@@ -11,5 +11,6 @@ from .runtime import StatsFromParameterScaling
 from .standalone import ConstScaling
 from .standalone import ParameterFromRuntimeStatsScaling
 from .standalone import ParameterScaling
+from .standalone import AccumulatorAwareParameterScaling
 
 SCALING_STATS_REDUCE_DIM = 1
