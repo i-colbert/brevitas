@@ -315,7 +315,7 @@ class AccumulatorAwareParameterScaling(brevitas.jit.ScriptModule):
             scaling_init: Union[float, Tensor],
             scaling_stats_input_view_shape_impl: Module,
             scaling_shape: Optional[Tuple[int, ...]] = None,
-            scaling_max_accumulator_size: Optional[float] = 32.,
+            accumulator_bit_width: Optional[float] = 32.,
             scaling_min_val: Optional[float] = None,
             scaling_enable_constraints: Optional[bool] = True,
             restrict_scaling_impl: Optional[Module] = None) -> None:
@@ -349,7 +349,7 @@ class AccumulatorAwareParameterScaling(brevitas.jit.ScriptModule):
         self.s_value = Parameter(data=scaling_init, requires_grad=True)
         assert self.g_value.shape == self.s_value.shape, "Error: norm and scales different shapes. Check scaling_shape."
         self.restrict_clamp_scaling = _RestrictClampValue(scaling_min_val, restrict_scaling_impl)
-        self.accumulator_bit_width = StatefulBuffer(torch.tensor(float(scaling_max_accumulator_size)))
+        self.accumulator_bit_width = StatefulBuffer(torch.tensor(float(accumulator_bit_width)))
 
         self.scaling_enable_constraints: bool = scaling_enable_constraints
         self.scaling_min_val: float = scaling_min_val
