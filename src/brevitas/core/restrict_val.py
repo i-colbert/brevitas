@@ -105,24 +105,32 @@ class FloatRestrictValue(brevitas.jit.ScriptModule):
 
 class LogFloatRestrictValue(brevitas.jit.ScriptModule):
 
-    def __init__(self):
+    def __init__(self, scaling_min_val: Optional[float] = None):
         super(LogFloatRestrictValue, self).__init__()
         self.power_of_two: Module = PowerOfTwo()
+        self.scaling_min_val = scaling_min_val
 
     def restrict_init_float(self, x: float):
+        if self.scaling_min_val is not None:
+            x = max(self.scaling_min_val, x)
         return math.log2(x)
 
     def restrict_init_tensor(self, x: torch.Tensor):
+        if self.scaling_min_val is not None:
+            x = x.clamp_min(self.scaling_min_val)
         return torch.log2(x)
 
     def restrict_init_module(self):
-        return LogTwo()
+        return LogTwo(self.scaling_min_val)
 
     def restrict_init_inplace_module(self):
-        return InplaceLogTwo()
+        return InplaceLogTwo(self.scaling_min_val)
 
     @brevitas.jit.script_method
     def forward(self, x: torch.Tensor):
+        if self.scaling_min_val is not None:
+            assert self.scaling_min_val > 0, "scaling_min_val needs to be > 0"
+            x = torch.clamp_min(x, math.log2(self.scaling_min_val))
         x = self.power_of_two(x)
         return x
 
