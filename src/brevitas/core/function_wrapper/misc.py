@@ -7,6 +7,7 @@ A collection of miscellaneous ScriptModule used in various quantizers.
 """
 
 import torch
+from typing import Optional
 
 import brevitas
 
@@ -61,11 +62,14 @@ class LogTwo(brevitas.jit.ScriptModule):
         tensor(3.)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, scaling_min_val: Optional[float] = None) -> None:
         super(LogTwo, self).__init__()
+        self.scaling_min_val = scaling_min_val
 
     @brevitas.jit.script_method
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.scaling_min_val is not None:
+            x = x.clamp_min(self.scaling_min_val)
         return torch.log2(x)
 
 
@@ -84,10 +88,13 @@ class InplaceLogTwo(torch.nn.Module):
         Inplace operations in TorchScript can be problematic, compilation is disabled.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, scaling_min_val: Optional[float] = None) -> None:
         super(InplaceLogTwo, self).__init__()
+        self.scaling_min_val = scaling_min_val
 
     @torch.jit.ignore
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.scaling_min_val is not None:        
+            x.clamp_min_(self.scaling_min_val)
         x.log2_()
         return x
