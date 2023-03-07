@@ -5,9 +5,10 @@
 import torch
 from torch import Tensor
 from torch.nn import Module
+from typing import Optional
 
 import brevitas
-from brevitas.core.utils import StatelessBuffer
+from brevitas.core.utils import StatelessBuffer, StatefulBuffer
 from brevitas.function.ops_ste import tensor_clamp_ste
 
 
@@ -30,10 +31,14 @@ class BitWidthConst(brevitas.jit.ScriptModule):
     Note:
         Maps to bit_width_impl_type == BitWidthImplType.CONST == 'CONST' == 'const' in higher-level APIs.
     """
-    def __init__(self, bit_width: int) -> None:
+    def __init__(
+            self,
+            bit_width: int,
+            bit_width_stateless: Optional[bool] = True) -> None:
         super(BitWidthConst, self).__init__()
         assert isinstance(bit_width, int)
-        self.bit_width = StatelessBuffer(torch.tensor(float(bit_width)))
+        buffer_class = StatelessBuffer if bit_width_stateless else StatefulBuffer
+        self.bit_width = buffer_class(torch.tensor(float(bit_width)))
 
     @brevitas.jit.script_method
     def forward(self) -> Tensor:
