@@ -70,6 +70,10 @@ class WeightQuantProxyFromInjector(ParameterQuantProxyFromInjector, WeightQuantP
     def tracked_parameter_list(self):
         return [m.weight for m in self.tracked_module_list if m.weight is not None]
 
+    @property
+    def requires_input_bit_width(self):
+        return False
+
     def scale(self):
         scale = self.__call__(self.tracked_parameter_list[0]).scale
         return scale
@@ -107,6 +111,22 @@ class DecoupledWeightQuantProxyFromInjector(WeightQuantProxyFromInjector):
         if self.is_quant_enabled:
             impl = self.export_handler if self.export_mode else self.tensor_quant
             out, scale, zero_point, bit_width, pre_scale, pre_zero_point = impl(x)
+            return QuantTensor(out, scale, zero_point, bit_width, self.is_signed, self.training)
+        else:  # quantization disabled
+            return QuantTensor(x, training=self.training)
+
+
+class InputBitWidthDecoupledWeightQuantProxyFromInjector(DecoupledWeightQuantProxyFromInjector):
+
+    @property
+    def requires_input_bit_width(self):
+        return True
+
+    def forward(self, x: Tensor, input_bit_width: Tensor, input_is_signed: bool) -> QuantTensor:
+        if self.is_quant_enabled:
+            assert isinstance(input_bit_width, Tensor), "input_bit_width needs to be a Tensor"
+            impl = self.export_handler if self.export_mode else self.tensor_quant
+            out, scale, zero_point, bit_width = impl(x, input_bit_width, input_is_signed)
             return QuantTensor(out, scale, zero_point, bit_width, self.is_signed, self.training)
         else:  # quantization disabled
             return QuantTensor(x, training=self.training)
