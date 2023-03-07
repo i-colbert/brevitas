@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List, Any, Dict
 import warnings
 
 import torch
@@ -22,7 +22,7 @@ from brevitas.core.stats import DEFAULT_MOMENTUM
 from brevitas.core.stats import SCALAR_SHAPE
 from brevitas.core.utils import inplace_momentum_update
 from brevitas.core.utils import inplace_tensor_mul
-from brevitas.core.utils import StatelessBuffer
+from brevitas.core.utils import StatelessBuffer, StatefulBuffer
 from brevitas.function import abs_binary_sign_grad
 
 
@@ -304,3 +304,112 @@ class ParameterFromRuntimeStatsScaling(brevitas.jit.ScriptModule):
             self.counter = self.collect_stats_steps + 1
         if config.IGNORE_MISSING_KEYS and value_key in missing_keys:
             missing_keys.remove(value_key)
+
+
+class AccumulatorAwareParameterScaling(brevitas.jit.ScriptModule):
+    """Parameter Scaling for Accumulator-Aware Quantization (A2Q)"""
+    def __init__(
+            self,
+            module: Module,
+            stats_reduce_dim: int,
+            scaling_init: Union[float, Tensor],
+            scaling_stats_input_view_shape_impl: Module,
+            scaling_shape: Optional[Tuple[int, ...]] = None,
+            scaling_max_accumulator_size: Optional[float] = 32.,
+            scaling_min_val: Optional[float] = None,
+            scaling_enable_constraints: Optional[bool] = True,
+            restrict_scaling_impl: Optional[Module] = None) -> None:
+        super(AccumulatorAwareParameterScaling, self).__init__()
+
+        if (isinstance(scaling_init, Tensor)
+                and scaling_shape is not None
+                and scaling_init.shape != SCALAR_SHAPE
+                and scaling_init.shape != scaling_shape):
+            raise RuntimeError("scaling_init.shape is non-scalar and != from scaling_shape.")
+
+        if isinstance(scaling_init, Tensor):
+            scaling_init = scaling_init.detach()
+        else:
+            scaling_init = torch.tensor(scaling_init)
+        if restrict_scaling_impl is not None:
+            scaling_init = restrict_scaling_impl.restrict_init_tensor(scaling_init)
+        if scaling_init.shape == SCALAR_SHAPE and scaling_shape is not None:
+            scaling_init = torch.full(scaling_shape, scaling_init)
+
+        # Initialize the log-scale norm parameter from the module
+        norm_init = module.weight.data.detach()
+        norm_init = scaling_stats_input_view_shape_impl(norm_init)
+        norm_init = norm_init.norm(p=1, dim=stats_reduce_dim, keepdim=True)
+        if restrict_scaling_impl is not None:
+            norm_init = restrict_scaling_impl.restrict_init_tensor(norm_init)
+        if scaling_shape is not None:
+            norm_init = norm_init.view(scaling_shape)
+
+        self.g_value = Parameter(data=norm_init, requires_grad=True)
+        self.s_value = Parameter(data=scaling_init, requires_grad=True)
+        assert self.g_value.shape == self.s_value.shape, "Error: norm and scales different shapes. Check scaling_shape."
+        self.restrict_clamp_scaling = _RestrictClampValue(scaling_min_val, restrict_scaling_impl)
+        self.accumulator_bit_width = StatefulBuffer(torch.tensor(float(scaling_max_accumulator_size)))
+
+        self.scaling_enable_constraints: bool = scaling_enable_constraints
+        self.scaling_min_val: float = scaling_min_val
+
+    @property
+    def is_accumulator_constraint_enabled(self) -> bool:
+        return self.scaling_enable_constraints
+
+    @property
+    def scaling_max_accumulator_size(self) -> Tensor:
+        return self.accumulator_bit_width()
+
+    @brevitas.jit.script_method
+    def get_upper_bound_on_l1_norm(self, input_bit_width: Tensor, input_is_signed: bool) -> Tensor:
+        """Calculate the upper bound on the l1-norm of the weights using the derivations from
+        `Quantized Neural Networks for Low-Precision Accumulation with Guaranteed Overflow
+        Avoidance` by I.Colbert, A.Pappalardo, and J.Petri-Koenig."""
+        # If unsure the sign on the input data, use the more difficult scenario
+        assert input_is_signed is not None, "A2Q relies on input bit width and input sign"
+        is_signed = float(input_is_signed) # 1. if signed else 0.
+        # This is the minimum of the two maximum magnitudes that P could take, which are -2^{P - 1}
+        # and 2^{P - 1} - 1. Note that evaluating to -2^{P-1} would mean there is a possibility of
+        # overflow on the positive side of this range.
+        max_accumulator_mag = pow(2., self.scaling_max_accumulator_size - 1.) - 1. # 2^{P - 1} - 1.
+        # This is the maximum possible magnitude that the input data could take. When the data
+        # is signed, this is 2^{N - 1}. When the data is unsigned, this is 2^{N} - 1. We use a
+        # slightly looser bound here to simplify our derivations on the export validation.
+        max_input_mag = pow(2., input_bit_width - is_signed) - 1. + float(self.scaling_enable_constraints)
+        return max_accumulator_mag / max(max_input_mag, self.scaling_min_val)        
+
+    @brevitas.jit.script_method
+    def get_max_scaled_l1_norm(self, scales: Tensor, input_bit_width: Tensor, input_is_signed: bool) -> Tensor:
+        """Calculate the maximum scaled l1-norm based on the raw l1-norm values"""
+        return scales * self.get_upper_bound_on_l1_norm(input_bit_width, input_is_signed)
+
+    @brevitas.jit.script_method
+    def forward(self, input_bit_width: Tensor, input_is_signed: bool) -> Tensor:
+        """Given the input_bit_width, calculate the scales and norms"""
+        scales = abs_binary_sign_grad(self.restrict_clamp_scaling(self.s_value)) # s = 2^v where v = -d
+        norms = abs_binary_sign_grad(self.restrict_clamp_scaling(self.g_value)) # g = 2^t
+        assert (scales > 0).all(), f"scales={scales.squeeze()}"
+        assert (norms > 0).all(), f"norms={norms.squeeze()}"
+        if self.scaling_enable_constraints:
+            max_norms = self.get_max_scaled_l1_norm(scales, input_bit_width, input_is_signed).detach()
+            assert (max_norms > 0).all(), f"max_norms={max_norms.squeeze()}"
+            new_norms = torch.clamp_max(norms, max_norms)
+            return new_norms, scales # g, s
+        return norms, scales # g, s
+
+    def _load_from_state_dict(self, state_dict: Dict, prefix: str, local_metadata: Any, strict: bool,
+                              missing_keys: List, unexpected_keys: List, error_msgs):
+        s_value_key = prefix + 's_value'
+        g_value_key = prefix + 'g_value'
+        retrocomp_value_key = prefix + 'learned_value'
+        if retrocomp_value_key in state_dict:  # retrocompatibility
+            state_dict[s_value_key] = state_dict.pop(retrocomp_value_key)
+        super(AccumulatorAwareParameterScaling, self)._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+        if config.IGNORE_MISSING_KEYS:
+            if s_value_key in missing_keys:
+                missing_keys.remove(s_value_key)
+            if g_value_key in missing_keys:
+                missing_keys.remove(g_value_key)
