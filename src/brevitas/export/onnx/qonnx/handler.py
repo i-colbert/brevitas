@@ -6,15 +6,18 @@ from abc import ABC
 from copy import copy
 
 import torch
+import torch.nn as nn
 from torch import Tensor
 
+from brevitas.quant_tensor import QuantTensor
 from brevitas.export.onnx.handler import ONNXBaseHandler
 from brevitas.export.onnx.handler import QuantLSTMLayerHandler
 from brevitas.proxy import ActQuantProxyFromInjector
 from brevitas.proxy import BiasQuantProxyFromInjector
 from brevitas.proxy import DecoupledWeightQuantProxyFromInjector
 from brevitas.proxy import WeightQuantProxyFromInjector
-from brevitas.proxy.runtime_quant import TruncQuantProxyFromInjector
+from brevitas.proxy import TruncQuantProxyFromInjector
+from brevitas.proxy import InputBitWidthDecoupledWeightQuantProxyFromInjector as InputBitWidthDWQPFI
 
 from .function import BrevitasBinaryQuantFn
 from .function import BrevitasQuantFn
@@ -87,6 +90,52 @@ class BrevitasDecoupledWeightQuantProxyHandler(BrevitasWeightQuantProxyHandler):
         pre_scale = self.extra_kwargs['pre_scale']
         pre_zero_point = self.extra_kwargs['pre_zero_point']
         return out, pre_scale, pre_zero_point, scale, zero_point, bit_width
+
+class BrevitasInputBitWidthDecoupledWeightQuantProxyHandler(BrevitasQuantProxyHandler):
+    handled_layer = InputBitWidthDWQPFI
+
+    def __init__(self):
+        super().__init__()
+        self.quant_weight = None
+
+    def validate(self, module):
+        """Validate im"""
+        quant_weight: QuantTensor = module.quant_weight()
+        if quant_weight.bit_width == 1:
+            assert quant_weight.zero_point() == 0, "Zero-point not supported for binary quant."
+        input_bit_width = module.quant_input_bit_width() # N
+        accumulator_bit_width = module.quant_accumulator_bit_width() # P
+        if isinstance(module, nn.Conv2d):
+            l1_norm = quant_weight.int().float().norm(p=1, dim=(1,2,3)).max()
+        elif isinstance(module, nn.Linear):
+            l1_norm = quant_weight.int().float().norm(p=1, dim=(1,)).max()
+        else:
+            raise NotImplementedError("Module not yet supported for accumulator-aware quantization")
+        alpha: Tensor = input_bit_width - int(module.is_quant_input_signed) + l1_norm.log2().squeeze()
+        phi = lambda x: torch.log2(1. + pow(2, -x))
+        assert (alpha + phi(alpha) + 1. <= accumulator_bit_width).all()
+
+    def prepare_for_export(self, module):
+        if module.is_quant_enabled:
+            # Quantizer sharing is not supported for export 
+            assert len(module.tracked_module_list) == 1
+            self.validate(module.tracked_module_list[0])
+            quant_weight = module.tracked_module_list[0].quant_weight()
+            self.quant_weight = quant_weight.value
+            self.symbolic_kwargs = {
+                'scale': quant_weight.scale,
+                'zero_point': quant_weight.zero_point,
+                'bit_width': quant_weight.bit_width,
+                # narrow range is not a property of the QuantTensor take it from the proxy instead
+                'narrow_range': module.is_narrow_range,
+                'signed': quant_weight.signed,
+                # override rounding mode since quantization has been pre-applied
+                'rounding_mode': 'ROUND'}
+
+    def symbolic_execution(self, x: Tensor, input_bit_width: Tensor, input_is_signed: bool):
+        # Quant weight bit width is retrieved through a cache, so we can just ignore the input_bit_width and input_is_signed
+        # We can't use x.data_ptr() as key to a dict because it points to the output of a computation
+        return super().symbolic_execution(self.quant_weight)
 
 
 class BrevitasActQuantProxyHandler(BrevitasQuantProxyHandler):
