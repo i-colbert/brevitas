@@ -60,10 +60,9 @@ class QuantWeightMixin(QuantProxyMixin):
     def weight_quant_requires_input_bit_width(self):
         return self.weight_quant.requires_input_bit_width
 
-    def quant_weight(self, quant_input: Optional[QuantTensor] = None):
+    def quant_weight(self):
         if self.weight_quant_requires_input_bit_width:
-            assert isinstance(quant_input, QuantTensor), "Need quant_input as QuantTensor"
-            return self.weight_quant(self.weight, quant_input.bit_width, quant_input.signed)
+            return self.weight_quant(self.weight, self.quant_input_bit_width(), self.is_quant_input_signed)
         return self.weight_quant(self.weight)
 
     def int_weight(self, float_datatype=False):
