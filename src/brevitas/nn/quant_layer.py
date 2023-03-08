@@ -308,6 +308,10 @@ class QuantWeightBiasInputOutputLayer(
         output_zero_point = None
         output_signed = None
 
+        # force cache quant_input if the weight quantizer requires knowledge of inputs
+        if self.weight_quant_requires_input_bit_width:
+            self.cache_inference_quant_inp = True
+
         inp = self.unpack_input(inp)
 
         # shortcut execution through the export impl during export
@@ -317,10 +321,7 @@ class QuantWeightBiasInputOutputLayer(
             return out
 
         quant_input = self.input_quant(inp)
-        if self.weight_quant_requires_input_bit_width:
-            quant_weight = self.quant_weight(quant_input)
-        else:
-            quant_weight = self.quant_weight()
+        quant_weight = self.quant_weight()
 
         if quant_input.bit_width is not None and quant_weight.bit_width is not None:
             output_bit_width = self.max_acc_bit_width(quant_input.bit_width, quant_weight.bit_width)
