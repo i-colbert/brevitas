@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+import torch
 from abc import ABCMeta
 from abc import abstractmethod
 from typing import Optional, Type, Union
@@ -79,6 +80,13 @@ class QuantWeightMixin(QuantProxyMixin):
     def quant_weight_bit_width(self):
         bit_width = self.quant_weight().bit_width
         return bit_width
+
+    def quant_accumulator_bit_width(self):
+        if self.weight_quant_requires_input_bit_width:
+            tensor_quant = self.weight_quant.tensor_quant
+            bit_width = tensor_quant.scaling_impl.accumulator_bit_width()
+            return bit_width
+        return torch.tensor(32.)
 
     def register_parameter(self, name, value):
         super(QuantWeightMixin, self).register_parameter(name, value)
