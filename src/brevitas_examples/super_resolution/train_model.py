@@ -83,7 +83,8 @@ def main():
         num_workers=args.workers,
         batch_size=args.batch_size,
         upscale_factor=model.upscale_factor,
-        download=True)
+        download=True,
+        crop_size=256)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(
         filter_params(model.named_parameters(), args.weight_decay),

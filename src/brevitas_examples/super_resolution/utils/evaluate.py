@@ -10,6 +10,8 @@ from brevitas.core.scaling import AccumulatorAwareZeroCenterParameterPreScaling
 import brevitas.nn as qnn
 from brevitas.nn.quant_layer import QuantWeightBiasInputOutputLayer as QuantWBIOL
 
+from ..models.espcn import QuantESPCN_NearestNeighborResizeConv
+
 EPS = 1e-10
 
 
@@ -77,6 +79,10 @@ def _calc_min_acc_bit_width(module: QuantWBIOL) -> Tensor:
 
 
 def evaluate_accumulator_bit_widths(model: nn.Module, inp: Tensor):
+    if isinstance(model, QuantESPCN_NearestNeighborResizeConv):
+        # Need to cache the quantized input to the final convolution to be able to evaluate the
+        # accumulator bounds since we need the input bit-width, which is specified at runtime.
+        model.conv4.conv.cache_inference_quant_inp = True
     model(inp)  # collect quant inputs now that caching is enabled
     stats = dict()
     for name, module in model.named_modules():

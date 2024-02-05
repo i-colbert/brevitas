@@ -10,6 +10,24 @@ import torch.nn as nn
 from .common import CommonIntAccumulatorAwareZeroCenterWeightQuant
 from .espcn import *
 
+other_models = {
+    'quant_espcn_x2_w4a4_subpixel':
+        partial(
+            quant_espcn,
+            upscale_factor=2,
+            weight_bit_width=4,
+            act_bit_width=4,
+            acc_bit_width=32,
+            weight_quant=CommonIntAccumulatorAwareZeroCenterWeightQuant),
+    'quant_espcn_x2_w4a4_nnrc':
+        partial(
+            quant_espcn_nnrc,
+            upscale_factor=2,
+            weight_bit_width=4,
+            act_bit_width=4,
+            acc_bit_width=32,
+            weight_quant=CommonIntAccumulatorAwareZeroCenterWeightQuant)}
+
 model_impl = {
     'float_espcn_x2':
         partial(float_espcn, upscale_factor=2),
@@ -60,7 +78,8 @@ model_impl = {
             weight_bit_width=8,
             act_bit_width=8,
             acc_bit_width=16,
-            weight_quant=CommonIntAccumulatorAwareZeroCenterWeightQuant)}
+            weight_quant=CommonIntAccumulatorAwareZeroCenterWeightQuant),
+    **other_models}
 
 root_url = 'https://github.com/Xilinx/brevitas/releases/download/'
 
