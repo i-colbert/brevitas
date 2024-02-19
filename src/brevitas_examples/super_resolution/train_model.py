@@ -8,6 +8,7 @@ import json
 import os
 import pprint
 import random
+from functools import partial
 
 import numpy as np
 import torch
@@ -15,7 +16,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.optim.lr_scheduler as lrs
 
-from brevitas_examples.super_resolution.models import get_model_by_name
+from brevitas_examples.super_resolution.models import other_models
 from brevitas_examples.super_resolution.utils import device
 from brevitas_examples.super_resolution.utils import evaluate_accumulator_bit_widths
 from brevitas_examples.super_resolution.utils import evaluate_avg_psnr
@@ -42,11 +43,13 @@ parser.add_argument(
 parser.add_argument(
     '--model',
     type=str,
-    default='quant_espcn_x2_w8a8_a2q_16b',
+    default='quant_espcn_w4a4_subpixel',
     help='Name of the model configuration')
 parser.add_argument('--workers', type=int, default=0, help='Number of data loading workers')
 parser.add_argument('--batch_size', type=int, default=8, help='Minibatch size')
 parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate')
+parser.add_argument('--upscale_factor', type=int, default=2, help='Upscaling factor. Default: 2')
+parser.add_argument('--crop_size', type=int, default=256, help='Size to crop output image. Default: 256')
 parser.add_argument('--total_epochs', type=int, default=500, help='Total number of training epochs')
 parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
 parser.add_argument('--step_size', type=int, default=1)
@@ -57,6 +60,9 @@ parser.add_argument('--save_model_io', action='store_true', default=False)
 parser.add_argument('--export_to_qonnx', action='store_true', default=False)
 parser.add_argument('--export_to_qcdq_onnx', action='store_true', default=False)
 parser.add_argument('--export_to_qcdq_torch', action='store_true', default=False)
+parser.add_argument('--random_seed', type=int, default=0)
+parser.add_argument('--act_bit_width', type=int, default=4)
+parser.add_argument('--weight_bit_width', type=int, default=4)
 
 
 def filter_params(named_params, decay):
@@ -75,16 +81,26 @@ def filter_params(named_params, decay):
 def main():
     args = parser.parse_args()
 
+    random.seed(args.random_seed)
+    np.random.seed(args.random_seed)
+    torch.manual_seed(args.random_seed)
+
     # initialize model, dataset, and training environment
-    model = get_model_by_name(args.model)
+    model_fn = other_models[args.model]
+    if args.model.startswith("quant"):
+        model_fn = partial(
+            model_fn, 
+            act_bit_width=args.act_bit_width, 
+            weight_bit_width=args.weight_bit_width)
+    model = model_fn(upscale_factor=args.upscale_factor)
     model = model.to(device)
     trainloader, testloader = get_bsd300_dataloaders(
         args.data_root,
         num_workers=args.workers,
         batch_size=args.batch_size,
         upscale_factor=model.upscale_factor,
-        download=True,
-        crop_size=256)
+        download=False,
+        crop_size=args.crop_size)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(
         filter_params(model.named_parameters(), args.weight_decay),
@@ -133,7 +149,6 @@ def main():
 
     # save and export model
     export(model, testloader, args)
-
 
 if __name__ == '__main__':
     main()
