@@ -7,26 +7,26 @@ from typing import Union
 from torch import hub
 import torch.nn as nn
 
-from .common import CommonIntAccumulatorAwareZeroCenterWeightQuant
+from .common import *
 from .espcn import *
 
 other_models = {
-    'quant_espcn_x2_w4a4_subpixel':
+    'float_espcn_deconv': float_espcn_deconv,
+    'float_espcn_subpixel': partial(float_espcn, use_inrc_init=True),
+    'float_espcn_nnrc': float_espcn_nnrc,
+    'quant_espcn_deconv':
+        partial(
+            quant_espcn_deconv,
+            weight_quant=CommonIntWeightPerChannelQuant),
+    'quant_espcn_subpixel':
         partial(
             quant_espcn,
-            upscale_factor=2,
-            weight_bit_width=4,
-            act_bit_width=4,
-            acc_bit_width=32,
-            weight_quant=CommonIntAccumulatorAwareZeroCenterWeightQuant),
-    'quant_espcn_x2_w4a4_nnrc':
+            weight_quant=CommonIntWeightPerChannelQuant,
+            use_inrc_init=True),
+    'quant_espcn_nnrc':
         partial(
             quant_espcn_nnrc,
-            upscale_factor=2,
-            weight_bit_width=4,
-            act_bit_width=4,
-            acc_bit_width=32,
-            weight_quant=CommonIntAccumulatorAwareZeroCenterWeightQuant)}
+            weight_quant=CommonIntWeightPerChannelQuant)}
 
 model_impl = {
     'float_espcn_x2':
