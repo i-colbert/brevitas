@@ -146,6 +146,7 @@ def _split_channels(
         module.bias.data = bias
 
     if is_per_channel_quant:
+        # TODO: add option to initialize scale for the new channel differently
         # we don't care about the axis dim, we need all other dim for reshaping later
         orig_scales_shape = list(orig_scales_shape)
         del orig_scales_shape[axis]
@@ -321,12 +322,14 @@ class GraphChannelSplitting(GraphTransform):
             self,
             split_ratio: float = 0.02,
             split_criterion: str = 'maxabs',
-            split_input: bool = True):
+            split_input: bool = True,
+            use_quant_error: bool = False):
         super(GraphChannelSplitting, self).__init__()
 
         self.split_ratio = split_ratio
         self.split_criterion = split_criterion
         self.split_input = split_input
+        self.use_quant_error = use_quant_error
 
     def apply(
             self,
@@ -341,7 +344,8 @@ class GraphChannelSplitting(GraphTransform):
                 regions=regions,
                 split_ratio=self.split_ratio,
                 split_criterion=self.split_criterion,
-                split_input=self.split_input)
+                split_input=self.split_input,
+                use_quant_error=self.use_quant_error)
         if return_regions:
             return model, regions
         else:
