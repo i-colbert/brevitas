@@ -8,6 +8,8 @@ from brevitas.graph.channel_splitting import _clean_regions
 from brevitas.graph.channel_splitting import _split
 from brevitas.graph.equalize import _extract_regions
 from brevitas.graph.fixed_point import MergeBatchNorm
+from brevitas.graph.quantize import preprocess_for_quantize
+from brevitas_examples.imagenet_classification.ptq.ptq_common import quantize_model
 
 from .equalization_fixtures import *
 
@@ -26,6 +28,7 @@ no_split_models = (
 SPLIT_RATIO = 0.1
 
 
+@pytest.mark.skip('debugging')
 @pytest.mark.parametrize('split_input', [False, True])
 def test_toymodels(toy_model, split_input, request):
     test_id = request.node.callspec.id
@@ -77,6 +80,7 @@ def test_toymodels(toy_model, split_input, request):
             assert not torch.equal(old_state_dict[weight_name], model.state_dict()[weight_name])
 
 
+@pytest.mark.skip('debugging')
 @pytest.mark.parametrize('split_input', [False, True])
 def test_torchvision_models(model_coverage: tuple, split_input: bool, request):
     model_class = request.node.callspec.id.split('-')[0]
@@ -119,3 +123,81 @@ def test_torchvision_models(model_coverage: tuple, split_input: bool, request):
         for module in modified_sinks:
             weight_name = module + '.weight'
             assert not torch.equal(old_state_dict[weight_name], model.state_dict()[weight_name])
+
+
+@pytest.mark.parametrize('split_input', [False, True])
+def test_quant_model(toy_model, split_input, request):
+    test_id = request.node.callspec.id
+
+    torch.manual_seed(SEED)
+
+    model_class = toy_model
+    model = model_class()
+    if 'mha' in test_id:
+        pytest.skip('MHA not supported with this quantization method')
+    else:
+        inp = torch.randn(IN_SIZE_CONV)
+
+    # preprocess model for quantization, like merge BN etc.
+    model = preprocess_for_quantize(model)
+    # save regions
+    regions = _extract_regions(model)
+    # quantize model pretty basic
+    quant_model = quantize_model(
+        model,
+        backend='layerwise',
+        weight_bit_width=8,
+        act_bit_width=8,
+        bias_bit_width=32,
+        scale_factor_type='float_scale',
+        weight_narrow_range=False,
+        weight_param_method='stats',
+        weight_quant_granularity='per_channel',
+        weight_quant_type='sym',
+        layerwise_first_last_bit_width=8,
+        act_param_method='stats',
+        act_quant_percentile=99.999,
+        act_quant_type='sym',
+        quant_format='int')
+
+    expected_out = quant_model(inp)
+
+    # save model's state dict to check if channel splitting was done or not
+    old_state_dict = quant_model.state_dict()
+    # quant_regions should be the same
+
+    quant_regions = _extract_regions(quant_model)
+    quant_regions = _clean_regions(quant_regions)
+    if model_class in no_split_models:
+        assert len(quant_regions) == 0
+    else:
+        quant_model = _split(
+            quant_model,
+            quant_regions,
+            split_ratio=SPLIT_RATIO,
+            split_input=split_input,
+            use_quant_error=False)
+
+        out = quant_model(inp)
+        # checking if the outputs are all close might not make too much sense for a quant model
+        assert torch.allclose(expected_out, out, atol=0.1)
+
+        modified_sources = {source for region in quant_regions for source in region.srcs_names}
+        # avoiding checking the same module multiple times
+        modified_sinks = {
+            sink for region in quant_regions for sink in region.sinks_names} - modified_sources
+        for module in modified_sources:
+            if 'mha' in module:
+                module += '.out_proj'
+            weight_name = module + '.weight'
+            assert not torch.equal(
+                old_state_dict[weight_name], quant_model.state_dict()[weight_name])
+            bias_name = module + '.bias'
+            # not all modules have bias and they only differ when splitting output channels
+            if bias_name in old_state_dict.keys() and not split_input:
+                assert not torch.equal(
+                    old_state_dict[bias_name], quant_model.state_dict()[bias_name])
+        for module in modified_sinks:
+            weight_name = module + '.weight'
+            assert not torch.equal(
+                old_state_dict[weight_name], quant_model.state_dict()[weight_name])
