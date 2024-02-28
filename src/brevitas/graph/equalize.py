@@ -93,14 +93,7 @@ _batch_norm = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)
 
 _ignore_ops = (getattr, 'size')
 
-_quant_modules = (
-    QuantReLU,
-    QuantIdentity,
-    QuantHardTanh,
-    QuantMaxPool1d,
-    QuantMaxPool2d,
-    QuantTanh,
-    QuantSigmoid)
+_quant_modules = (QuantReLU, QuantIdentity, QuantHardTanh, QuantTanh, QuantSigmoid)
 
 
 # Start and End identify the starting and ending channels of the weight matrix that need to be

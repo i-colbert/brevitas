@@ -28,16 +28,15 @@ no_split_models = (
 SPLIT_RATIO = 0.1
 
 
-@pytest.mark.skip('debugging')
 @pytest.mark.parametrize('split_input', [False, True])
 def test_toymodels(toy_model, split_input, request):
-    test_id = request.node.callspec.id
+    model_name = request.node.callspec.id.split('-')[0]
 
     torch.manual_seed(SEED)
 
     model_class = toy_model
     model = model_class()
-    if 'mha' in test_id:
+    if 'mha' in model_name:
         inp = torch.randn(IN_SIZE_LINEAR)
     else:
         inp = torch.randn(IN_SIZE_CONV)
@@ -54,7 +53,7 @@ def test_toymodels(toy_model, split_input, request):
 
     regions = _extract_regions(model)
     regions = _clean_regions(regions)
-    if model_class in no_split_models:
+    if model_name in no_split_models:
         assert len(regions) == 0
     else:
         model = _split(model, regions, split_ratio=SPLIT_RATIO, split_input=split_input)
@@ -80,10 +79,9 @@ def test_toymodels(toy_model, split_input, request):
             assert not torch.equal(old_state_dict[weight_name], model.state_dict()[weight_name])
 
 
-@pytest.mark.skip('debugging')
 @pytest.mark.parametrize('split_input', [False, True])
 def test_torchvision_models(model_coverage: tuple, split_input: bool, request):
-    model_class = request.node.callspec.id.split('-')[0]
+    model_name = request.node.callspec.id.split('-')[0]
 
     model, coverage = model_coverage
 
@@ -101,7 +99,7 @@ def test_torchvision_models(model_coverage: tuple, split_input: bool, request):
 
     regions = _extract_regions(model)
     regions = _clean_regions(regions)
-    if model_class in no_split_models:
+    if model_name in no_split_models:
         assert len(regions) == 0
     else:
         model = _split(model, regions, split_ratio=SPLIT_RATIO, split_input=split_input)
@@ -127,13 +125,13 @@ def test_torchvision_models(model_coverage: tuple, split_input: bool, request):
 
 @pytest.mark.parametrize('split_input', [False, True])
 def test_quant_model(toy_model, split_input, request):
-    test_id = request.node.callspec.id
+    model_name = request.node.callspec.id.split('-')[0]
 
     torch.manual_seed(SEED)
 
     model_class = toy_model
     model = model_class()
-    if 'mha' in test_id:
+    if 'mha' in model_name:
         pytest.skip('MHA not supported with this quantization method')
     else:
         inp = torch.randn(IN_SIZE_CONV)
@@ -165,18 +163,18 @@ def test_quant_model(toy_model, split_input, request):
     # save model's state dict to check if channel splitting was done or not
     old_state_dict = quant_model.state_dict()
     # quant_regions should be the same
-
     quant_regions = _extract_regions(quant_model)
     quant_regions = _clean_regions(quant_regions)
-    if model_class in no_split_models:
+
+    if model_name in no_split_models:
         assert len(quant_regions) == 0
     else:
+        # check regions
+        assert len(quant_regions) == len(regions)
+
+        # pass custom split function here
         quant_model = _split(
-            quant_model,
-            quant_regions,
-            split_ratio=SPLIT_RATIO,
-            split_input=split_input,
-            use_quant_error=False)
+            quant_model, quant_regions, split_ratio=SPLIT_RATIO, split_input=split_input)
 
         out = quant_model(inp)
         # checking if the outputs are all close might not make too much sense for a quant model
