@@ -38,9 +38,9 @@ def quant_duplicate_input(channel, scale, zero_point, module):
 def _channels_to_split(
         sources: Dict[str, nn.Module],
         sinks: Dict[str, nn.Module],
-        split_criterion: str,
         split_ratio: float,
-        split_input: bool) -> Dict[nn.Module, List[torch.Tensor]]:
+        split_input: bool,
+        split_criterion_func: Callable = _channel_maxabs) -> Dict[nn.Module, List[torch.Tensor]]:
     """
     This method computes the channels that will be split based on `split_criterion`.
     """
@@ -52,16 +52,15 @@ def _channels_to_split(
     splits_per_layer = int(math.ceil(split_ratio * num_channels))
 
     all_channels = []
-    if split_criterion == 'maxabs':
-        for module in modules:
-            # get input/output axis of module
-            axis = _get_axis(module)
-            # transpose to have axis as first dimension
-            weight_t = transpose(module.weight, axis)
-            # flatten all but first dimension and get max per channel
-            max_per_channel = _channel_maxabs(weight_t.reshape(weight_t.size(0), -1))
-            channels_sorted = torch.argsort(max_per_channel, descending=True)
-            all_channels.append(channels_sorted[:splits_per_layer])
+    for module in modules:
+        # get input/output axis of module
+        axis = _get_axis(module)
+        # transpose to have axis as first dimension
+        weight_t = transpose(module.weight, axis)
+        # flatten all but first dimension and get max per channel
+        max_per_channel = split_criterion_func(weight_t.reshape(weight_t.size(0), -1))
+        channels_sorted = torch.argsort(max_per_channel, descending=True)
+        all_channels.append(channels_sorted[:splits_per_layer])
 
     # return tensor with the unique indices to split
     channels_to_split = torch.cat(all_channels)
@@ -96,7 +95,8 @@ def _split_quantized_channels(
     # we can only split scales etc. for output channels, so check if we are splitting output
     if not split_input and module.weight_quant.scale().shape[axis] == orig_shape[axis]:
         is_per_channel_quant = True
-        scales = module.weight_quant.tensor_quant.scaling_impl.value.data
+        # if scales are in the log domain, then arithmetic manipulations need to take that into account
+        scales = module.weight_quant.tensor_quant.scaling_impl(weight_t)
         orig_scales_shape = scales.shape
         # get view of scales
         scales_t = transpose(scales, axis)
@@ -118,7 +118,7 @@ def _split_quantized_channels(
         # get channel to split
         channel_to_split = weight_t[id, :]
         # get scale for channel
-        scale_to_split = scales_t[id] if not split_input else module.weight_quant.scale()
+        scale_to_split = scales_t[id] if is_per_channel_quant else module.weight_quant.scale()
         # get zero point
         zero_point_to_split = zero_points[id] if is_asym_quant else torch.tensor(0.)
         # split channel/scale/zero_point based on user defined method, i.e. halfing it, duplicating it
@@ -169,7 +169,15 @@ def _split_quantized_channels(
         scales_t = scales_t.reshape(scales_t.size(0), *orig_scales_shape)
         scales_t = transpose(scales_t, axis)
         # set value for scaling_impl to scales
-        module.weight_quant.tensor_quant.scaling_impl.value.data = scales_t
+        scaling_impl = module.weight_quant.tensor_quant.scaling_impl
+        try:
+            scales_t = scaling_impl.restrict_clamp_scaling.restrict_value_impl.restrict_init_tensor(
+                scales_t)
+        except AttributeError:
+            # no restrict_clamp_scaling, so pass
+            pass
+        finally:
+            module.weight_quant.tensor_quant.scaling_impl.value.data = scales_t
 
     if is_asym_quant:
         # set zero_points to module, reshape using scales shape as it's the same
@@ -350,8 +358,8 @@ def _split(
         regions: List[Region],
         split_ratio: float,
         split_input: bool,
-        quant_split_func: Optional[Callable] = quant_split_evenly,
-        split_criterion: str = 'maxabs') -> GraphModule:
+        quant_split_func: Callable = quant_split_evenly,
+        split_criterion_func: Callable = _channel_maxabs) -> GraphModule:
     for i, region in enumerate(regions):
         sources = [region.get_module_from_name(src) for src in region.srcs_names]
         sinks = [region.get_module_from_name(sink) for sink in region.sinks_names]
@@ -364,7 +372,7 @@ def _split(
         channels_to_split = _channels_to_split(
             sources=sources,
             sinks=sinks,
-            split_criterion=split_criterion,
+            split_criterion_func=split_criterion_func,
             split_ratio=split_ratio,
             split_input=split_input)
         # splitting/duplicating channels
@@ -420,13 +428,13 @@ class GraphChannelSplitting(GraphTransform):
     def __init__(
             self,
             split_ratio: float = 0.02,
-            split_criterion: str = 'maxabs',
+            split_criterion_func: Callable = _channel_maxabs,
             split_input: bool = True,
-            quant_split_func: Optional[Callable] = quant_split_evenly):
+            quant_split_func: Callable = quant_split_evenly):
         super(GraphChannelSplitting, self).__init__()
 
         self.split_ratio = split_ratio
-        self.split_criterion = split_criterion
+        self.split_criterion_func = split_criterion_func
         self.split_input = split_input
         self.quant_split_func = quant_split_func
 
@@ -442,7 +450,7 @@ class GraphChannelSplitting(GraphTransform):
                 model=model,
                 regions=regions,
                 split_ratio=self.split_ratio,
-                split_criterion=self.split_criterion,
+                split_criterion_func=self.split_criterion_func,
                 split_input=self.split_input,
                 quant_split_func=self.quant_split_func)
         if return_regions:
