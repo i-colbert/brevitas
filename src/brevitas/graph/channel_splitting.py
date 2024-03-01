@@ -40,7 +40,7 @@ def _channels_to_split(
         sinks: Dict[str, nn.Module],
         split_ratio: float,
         split_input: bool,
-        split_criterion_func: Callable = _channel_maxabs) -> Dict[nn.Module, List[torch.Tensor]]:
+        split_criterion_func: Callable) -> Dict[nn.Module, List[torch.Tensor]]:
     """
     This method computes the channels that will be split based on `split_criterion`.
     """
@@ -269,7 +269,7 @@ def _duplicate_channels(
             module, channels_to_split, split_input=duplicate_input, split_factor=1)
 
 
-def _split_channels(module, channels_to_split, split_input, quant_split_func=quant_split_evenly):
+def _split_channels(module, channels_to_split, split_input, quant_split_func):
     # wrapper for splitting channels in quant/unquant modules
     if isinstance(module, QuantLayerMixin):
         # split quantized channels using the specified splitting mechanism
@@ -285,7 +285,7 @@ def _split_channels_region(
         sinks: Dict[str, nn.Module],
         channels_to_split: torch.tensor,
         split_input: bool,
-        quant_split_func: Callable = quant_split_evenly) -> None:
+        quant_split_func: Callable) -> None:
     if not split_input:
         # splitting output channels
         for module in sources:

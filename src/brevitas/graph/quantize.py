@@ -1,6 +1,8 @@
 # Copyright (C) 2023, Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from typing import Callable, Optional
+
 from torch import nn
 
 from brevitas import config
@@ -9,6 +11,7 @@ from brevitas.core.scaling.standalone import ParameterScaling
 from brevitas.fx.brevitas_tracer import symbolic_trace
 from brevitas.graph.base import ModuleToModuleByClass
 from brevitas.graph.channel_splitting import GraphChannelSplitting
+from brevitas.graph.equalize import _channel_maxabs
 from brevitas.graph.equalize import EqualizeGraph
 from brevitas.graph.fixed_point import CollapseConsecutiveConcats
 from brevitas.graph.fixed_point import MergeBatchNorm
@@ -293,7 +296,7 @@ def preprocess_for_quantize(
         equalize_scale_computation: str = 'maxabs',
         channel_splitting_ratio: float = 0.0,
         channel_splitting_split_input: bool = True,
-        channel_splitting_criterion: str = 'maxabs'):
+        channel_splitting_split_criterion_func: Callable = _channel_maxabs):
 
     training_state = model.training
     model.eval()
@@ -316,9 +319,10 @@ def preprocess_for_quantize(
         bias_shrinkage=equalize_bias_shrinkage,
         scale_computation_type=equalize_scale_computation).apply(model)
     if channel_splitting_ratio > 0:
+        # not setting quant_split_func since we're preprocessing for quantization
         model = GraphChannelSplitting(
             split_ratio=channel_splitting_ratio,
-            split_criterion=channel_splitting_criterion,
+            split_criterion=channel_splitting_split_criterion_func,
             split_input=channel_splitting_split_input).apply(model)
     model.train(training_state)
     return model
