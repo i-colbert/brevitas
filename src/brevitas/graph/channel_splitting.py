@@ -156,7 +156,7 @@ def _split_quantized_channels(
     del orig_shape[axis]
     weight_t = weight_t.reshape(weight_t.size(0), *orig_shape)
     weight_t = transpose(weight_t, axis)
-    module.weight.data = weight_t
+    module.weight.data = weight_t.clone().contiguous()
 
     if bias is not None:
         module.bias.data = bias
