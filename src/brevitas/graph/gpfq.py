@@ -17,6 +17,7 @@ from brevitas.graph.gpxq import gpxq_mode
 from brevitas.graph.gpxq import StopFwdException
 from brevitas.graph.gpxq import SUPPORTED_CONV_OP
 import brevitas.nn as qnn
+from brevitas.quant_tensor import QuantTensor
 
 
 class GPFQ(GPxQ):
@@ -188,6 +189,28 @@ class GPFA2Q(GPFQ):
         self.accumulator_bit_width = accumulator_bit_width
         assert self.accumulator_bit_width is not None
         self.requires_quant_input = True  # force true
+
+    def process_input(self, inp):
+        inp = super().process_input(inp)
+        inp = self.layer.input_quant(inp)
+
+        is_quant_enabled = self.layer.weight_quant.is_quant_enabled
+
+        # If using quantized activations, inp could be QuantTensor. In
+        # this case, we overwrite the metadata.
+        if isinstance(inp, QuantTensor):
+            if is_quant_enabled and self.quant_input is None:
+                self.quant_input = QuantTensor(
+                    value=torch.empty(
+                        1, dtype=self.layer.weight.dtype, device=self.layer.weight.device),
+                    scale=inp.scale,
+                    zero_point=inp.zero_point,
+                    bit_width=inp.bit_width,
+                    signed=inp.signed,
+                    training=inp.training)
+            inp = inp.value
+
+        return inp
 
     def single_layer_update(self):
         # raise error in case no quant-input is here
