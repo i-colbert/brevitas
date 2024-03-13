@@ -69,6 +69,26 @@ def model_coverage(model_dict: dict):
 
 
 @pytest_cases.fixture
+def simple_model():
+
+    class SimpleModel(nn.Module):
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv_0 = nn.Conv2d(3, 16, kernel_size=3)
+            self.relu = nn.ReLU()
+            self.conv_1 = nn.Conv2d(16, 32, kernel_size=3)
+
+        def forward(self, x):
+            x = self.conv_0(x)
+            x = self.relu(x)
+            x = self.conv_1(x)
+            return x
+
+    return SimpleModel
+
+
+@pytest_cases.fixture
 def bnconv_model():
 
     class BNConvModel(nn.Module):
@@ -348,6 +368,7 @@ def convtranspose_model():
 
 
 list_of_fixtures = [
+    'simple_model',
     'residual_model',
     'srcsinkconflict_model',
     'mul_model',

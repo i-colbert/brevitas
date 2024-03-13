@@ -169,6 +169,8 @@ class GPFQ(GPxQ):
             if len(inp.shape) > 2:
                 inp = inp.reshape((-1, sum(inp.shape[2:])))
             # For QuantLinear layer, groups will be 1
+            if isinstance(inp, QuantTensor):
+                inp = inp.value
             inp_processed = inp.unsqueeze(0)
 
         if isinstance(self.layer, SUPPORTED_CONV_OP):

@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
 from brevitas.fx import GraphModule
 from brevitas.graph.base import GraphTransform
@@ -30,15 +31,31 @@ def quant_split_evenly(channel, scale, zero_point, module):
     return channel / 2., channel / 2., scale, scale, zero_point, zero_point
 
 
-def quant_duplicate_input(channel, scale, zero_point, module):
+def compressibility_loss(inp: torch.Tensor, dim: int = 1) -> torch.Tensor:
+    out = torch.norm(inp, dim=dim, p=1) / torch.norm(inp, dim=dim, p=2)
+    return out
+
+
+def quant_split_quant_error(channel, scale, zero_point, bias, module):
+    bit_width = module.weight_quant.bit_width()
+    int_threshold = module.weight_quant.tensor_quant.int_scaling_impl(bit_width)
+    # TODO: insert assertion about the int_quant
+    split_channel = channel - module.weight_quant.tensor_quant.int_quant(
+        scale / int_threshold, zero_point, bit_width, channel)
+    # leaving scales untouched and initializing bias 1:0
+    device = bias.device if bias is not None else 'cpu'
+    return channel.clone(), split_channel, scale, scale, zero_point, zero_point, bias, torch.tensor(0.0, device=device)
+
+
+def quant_duplicate_input(channel, scale, zero_point, bias, module):
     # no need to return anything else
-    return channel, channel, scale, scale, zero_point, zero_point
+    return channel, channel, scale, scale, zero_point, zero_point, bias, bias
 
 
 def _channels_to_split(
         sources: Dict[str, nn.Module],
         sinks: Dict[str, nn.Module],
-        split_ratio: float,
+        layer_split_perc_func: Callable,
         split_input: bool,
         split_criterion_func: Callable) -> Dict[nn.Module, List[torch.Tensor]]:
     """
@@ -49,7 +66,8 @@ def _channels_to_split(
     # the modules are all of the same shape so we can just take the first one
     single_module = next(iter(modules))
     num_channels = single_module.weight.shape[_get_axis(single_module)]
-    splits_per_layer = int(math.ceil(split_ratio * num_channels))
+    split_perc = layer_split_perc_func(single_module)
+    splits_per_layer = int(math.ceil(split_perc * num_channels))
 
     all_channels = []
     for module in modules:
@@ -121,11 +139,17 @@ def _split_quantized_channels(
         scale_to_split = scales_t[id] if is_per_channel_quant else module.weight_quant.scale()
         # get zero point
         zero_point_to_split = zero_points[id] if is_asym_quant else torch.tensor(0.)
-        # split channel/scale/zero_point based on user defined method, i.e. halfing it, duplicating it
-        split_values = split_func(channel_to_split, scale_to_split, zero_point_to_split, module)
-        assert len(split_values) == 6, 'split method needs to return 6 values: 2x channel, 2x scale, 2x zero_point'
+        # get bias
+        if bias is not None and not split_input:
+            bias_to_split = bias[id]
+        else:
+            bias_to_split = None
+        # split channel/scale/zero_point/bias based on user defined method, i.e. halfing it, duplicating it
+        split_values = split_func(
+            channel_to_split, scale_to_split, zero_point_to_split, bias_to_split, module)
+        assert len(split_values) == 8, 'split method needs to return 8 values: 2x channel, 2x scale, 2x zero_point, 2x bias'
         # unpack all split_values
-        split_channel_0, split_channel_1, split_scale_0, split_scale_1, zero_point_0, zero_point_1 = split_values
+        split_channel_0, split_channel_1, split_scale_0, split_scale_1, zero_point_0, zero_point_1, split_bias_0, split_bias_1 = split_values
         # set original channel to split_channel_0 and then stack the second channel
         weight_t[id, :] = split_channel_0
         # expand so we can stack
@@ -146,11 +170,9 @@ def _split_quantized_channels(
             zero_points = torch.cat([zero_points, zero_point_1], dim=0)
 
         if bias is not None and not split_input:
-            # TODO:
-            # currently hardcoded to be split evenly, should bias be included in split_func?
-            bias[id] *= 0.5
-            split_bias = bias[id:id + 1]
-            bias = torch.cat((bias, split_bias))
+            bias[id] = split_bias_0
+            split_bias_1 = split_bias_1.unsqueeze(0)
+            bias = torch.cat([bias, split_bias_1], dim=0)
 
     # reshape weight_t back to orig shape with the added channels
     del orig_shape[axis]
@@ -159,7 +181,7 @@ def _split_quantized_channels(
     module.weight.data = weight_t.clone().contiguous()
 
     if bias is not None:
-        module.bias.data = bias
+        module.bias.data = bias.clone().contiguous()
 
     if is_per_channel_quant:
         # we don't care about the axis dim, we need all other dim for reshaping later
@@ -177,13 +199,15 @@ def _split_quantized_channels(
             # no restrict_clamp_scaling, so pass
             pass
         finally:
-            module.weight_quant.tensor_quant.scaling_impl.value.data = scales_t
+            # TODO: this is the wrong attribute to set, ask Giuseppe for the right place to set them to
+            module.weight_quant.tensor_quant.scaling_impl.value.data = scales_t.clone().contiguous()
 
     if is_asym_quant:
         # set zero_points to module, reshape using scales shape as it's the same
         zero_points_t = zero_points_t.reshape(zero_points_t.size(0), *orig_scales_shape)
         zero_points_t = transpose(zero_points_t, axis)
-        module.weight_quant.tensor_quant.zero_point_impl.value.data = zero_points_t
+        module.weight_quant.tensor_quant.zero_point_impl.value.data = zero_points_t.clone(
+        ).contiguous()
 
     if isinstance(module, _conv):
         if split_input:
@@ -356,9 +380,9 @@ def _unwrap_mha(sources: List[nn.Module]) -> List[nn.Module]:
 def _split(
         model: GraphModule,
         regions: List[Region],
-        split_ratio: float,
+        layer_split_perc_func: Callable,
         split_input: bool,
-        quant_split_func: Callable = quant_split_evenly,
+        quant_split_func: Callable = quant_split_quant_error,
         split_criterion_func: Callable = _channel_maxabs) -> GraphModule:
     for i, region in enumerate(regions):
         sources = [region.get_module_from_name(src) for src in region.srcs_names]
@@ -373,7 +397,7 @@ def _split(
             sources=sources,
             sinks=sinks,
             split_criterion_func=split_criterion_func,
-            split_ratio=split_ratio,
+            layer_split_perc_func=layer_split_perc_func,
             split_input=split_input)
         # splitting/duplicating channels
         _split_channels_region(
@@ -386,7 +410,7 @@ def _split(
     return model
 
 
-def _clean_regions(regions: List[Region]) -> List[Region]:
+def _clean_regions(regions: List[Region], region_filter_func: Callable) -> List[Region]:
     """
     Given a list of regions, this method removes all regions that are not compatible with channel splitting.
     """
@@ -394,7 +418,7 @@ def _clean_regions(regions: List[Region]) -> List[Region]:
     regions_to_del = set()
     source_modules = dict()
     sink_modules = dict()
-    for i, region in enumerate(regions):
+    for i, region in enumerate(tqdm(regions)):
         sources = [region.get_module_from_name(src) for src in region.srcs_names]
         sinks = [region.get_module_from_name(sink) for sink in region.sinks_names]
 
@@ -418,6 +442,10 @@ def _clean_regions(regions: List[Region]) -> List[Region]:
         if not _is_supported(srcs=sources, sinks=sinks):
             # add region to be deleted
             regions_to_del.add(i)
+        # check if user filters out this region
+        if not region_filter_func(sources, sinks):
+            # user doesn't want to split this region
+            regions_to_del.add(i)
 
     regions = [regions[i] for i, _ in enumerate(regions) if i not in regions_to_del]
     return regions
@@ -426,17 +454,21 @@ def _clean_regions(regions: List[Region]) -> List[Region]:
 class GraphChannelSplitting(GraphTransform):
 
     def __init__(
-            self,
-            split_ratio: float = 0.02,
-            split_criterion_func: Callable = _channel_maxabs,
-            split_input: bool = True,
-            quant_split_func: Callable = quant_split_evenly):
+        self,
+        split_input: bool = True,
+        split_criterion_func: Callable = compressibility_loss,
+        quant_split_func: Callable = quant_split_quant_error,
+        layer_split_perc_func: Optional[Callable[[nn.Module], float]] = lambda x: 0.02,
+        region_filter_func: Optional[Callable[[List[nn.Module], List[nn.Module]],
+                                              bool]] = lambda sources,
+        sinks: True):
         super(GraphChannelSplitting, self).__init__()
 
-        self.split_ratio = split_ratio
-        self.split_criterion_func = split_criterion_func
         self.split_input = split_input
+        self.layer_split_perc_func = layer_split_perc_func
+        self.split_criterion_func = split_criterion_func
         self.quant_split_func = quant_split_func
+        self.region_filter_func = region_filter_func
 
     def apply(
             self,
@@ -444,12 +476,12 @@ class GraphChannelSplitting(GraphTransform):
             return_regions: bool = False
     ) -> Union[Tuple[GraphModule, Set[Tuple[str]]], GraphModule]:
         regions = _extract_regions(model)
-        regions = _clean_regions(regions)
+        regions = _clean_regions(regions, region_filter_func=self.region_filter_func)
         if len(regions) > 0:
             model = _split(
                 model=model,
                 regions=regions,
-                split_ratio=self.split_ratio,
+                layer_split_perc_func=self.layer_split_perc_func,
                 split_criterion_func=self.split_criterion_func,
                 split_input=self.split_input,
                 quant_split_func=self.quant_split_func)
