@@ -294,7 +294,8 @@ def preprocess_for_quantize(
         merge_bn=True,
         equalize_bias_shrinkage: str = 'vaiq',
         equalize_scale_computation: str = 'maxabs',
-        channel_splitting_ratio: float = 0.0,
+        apply_channel_splitting: bool = True,
+        channel_splitting_layer_split_perc_func: Callable = lambda x: 0.02,
         channel_splitting_split_input: bool = True,
         channel_splitting_split_criterion_func: Callable = _channel_maxabs):
 
@@ -318,11 +319,11 @@ def preprocess_for_quantize(
         merge_bias=equalize_merge_bias,
         bias_shrinkage=equalize_bias_shrinkage,
         scale_computation_type=equalize_scale_computation).apply(model)
-    if channel_splitting_ratio > 0:
+    if apply_channel_splitting:
         # not setting quant_split_func since we're preprocessing for quantization
         model = GraphChannelSplitting(
-            split_ratio=channel_splitting_ratio,
-            split_criterion=channel_splitting_split_criterion_func,
+            layer_split_perc_func=channel_splitting_layer_split_perc_func,
+            split_criterion_func=channel_splitting_split_criterion_func,
             split_input=channel_splitting_split_input).apply(model)
     model.train(training_state)
     return model

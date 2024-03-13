@@ -6,6 +6,7 @@ from functools import partial
 from itertools import product
 import os
 import random
+import traceback
 from types import SimpleNamespace
 
 import numpy as np
@@ -20,6 +21,7 @@ import torch.utils.data.distributed
 from brevitas import __version__ as brevitas_version
 from brevitas import config
 from brevitas import torch_version
+from brevitas.graph.channel_splitting import GraphChannelSplitting
 from brevitas.graph.quantize import preprocess_for_quantize
 from brevitas.graph.target.flexml import preprocess_for_flexml_quantize
 from brevitas_examples.imagenet_classification.ptq.ptq_common import apply_act_equalization
@@ -106,7 +108,8 @@ OPTIONS_DEFAULT = {
     'act_quant_percentile': [99.999],  # Activation Quantization Percentile
     'uint_sym_act_for_unsigned_values': [True],  # Whether to use unsigned act quant when possible
     'channel_splitting_ratio': [0.0],  # Channel Splitting ratio, 0.0 means no splitting
-    'split_input': [True],  # Whether to split the input channels when applying channel splitting
+    'quant_channel_splitting_ratio': [0.0],  # channel splitting after quantizing
+    'split_input': [False],  # Whether to split the input channels when applying channel splitting
     'merge_bn': [True]}  # Whether to merge BN layers
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet PTQ Validation')
@@ -146,6 +149,8 @@ def main():
     try:
         ptq_torchvision_models(args)
     except Exception as E:
+        with open(f'errorInfo_{args.idx}.txt', 'w') as error_file:
+            error_file.write(traceback.format_exc())
         print("Exception at index {}: {}".format(args.idx, E))
 
 
@@ -165,6 +170,7 @@ def ptq_torchvision_models(args):
             configs.append(hashabledict(**config_namespace.__dict__))
 
     configs = unique(configs)
+    print(f'length of configs: {len(configs)}')
 
     if args.idx > len(configs) - 1:
         return
@@ -214,10 +220,16 @@ def ptq_torchvision_models(args):
             equalize_iters=config_namespace.graph_eq_iterations,
             equalize_merge_bias=config_namespace.graph_eq_merge_bias,
             merge_bn=config_namespace.merge_bn,
-            channel_splitting_ratio=config_namespace.channel_splitting_ratio,
+            channel_splitting_ratio=config_namespace.quant_channel_splitting_ratio,
             channel_splitting_split_input=config_namespace.split_input)
     else:
         raise RuntimeError(f"{config_namespace.target_backend} backend not supported.")
+
+    # If available, use the selected GPU
+    if args.gpu is not None:
+        torch.cuda.set_device(args.gpu)
+        model = model.cuda(args.gpu)
+        cudnn.benchmark = False
 
     if config_namespace.act_equalization is not None:
         print("Applying activation equalization:")
@@ -252,6 +264,16 @@ def ptq_torchvision_models(args):
         quant_model = quant_model.cuda(args.gpu)
         cudnn.benchmark = False
 
+    # apply channel splitting here after quantizing the model
+    if config_namespace.channel_splitting_ratio > 0:
+        print("Applying Channel Splitting:")
+        # or supply function to split individual layers differently
+        quant_model = GraphChannelSplitting(
+            region_filter_func=lambda x,
+            y: True,
+            layer_split_perc_func=lambda x: config_namespace.quant_channel_splitting_ratio,
+            split_input=config_namespace.split_input).apply(quant_model)
+
     # Calibrate the quant_model on the calibration dataloader
     print("Starting calibration")
     calibrate(calib_loader, quant_model)
@@ -271,7 +293,7 @@ def ptq_torchvision_models(args):
             quant_model,
             p=config_namespace.gpfq_p,
             act_order=config_namespace.gpxq_act_order,
-            gpfa2q=config_namespace.gpfa2q,
+            use_gpfa2q=config_namespace.gpfa2q,
             accumulator_bit_width=config_namespace.accumulator_bit_width)
 
     if config_namespace.gptq:
@@ -342,6 +364,7 @@ def validate_config(config_namespace):
     elif multiple_gpxqs == 0:
         # no gpxq algorithm, set act order to None
         config_namespace.gpxq_act_order = None
+        is_valid = False
 
     if config_namespace.act_equalization == 'layerwise' and config_namespace.target_backend == 'fx':
         is_valid = False
@@ -372,8 +395,10 @@ def validate_config(config_namespace):
             is_valid = False
         if config_namespace.act_exponent_bit_width + config_namespace.act_mantissa_bit_width != config_namespace.act_bit_width - 1:
             is_valid = False
+    if config_namespace.channel_splitting_ratio > 0 and config_namespace.quant_channel_splitting_ratio > 0:
+        is_valid = False
     # if channel splitting is disabled, no need for split input
-    if not config_namespace.channel_splitting_ratio:
+    if config_namespace.channel_splitting_ratio == 0 and config_namespace.quant_channel_splitting_ratio == 0:
         config_namespace.split_input = None
 
     config_namespace.is_valid = is_valid
