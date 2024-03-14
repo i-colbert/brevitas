@@ -6,6 +6,9 @@ import torch
 from brevitas.fx import symbolic_trace
 from brevitas.graph.channel_splitting import _clean_regions
 from brevitas.graph.channel_splitting import _split
+from brevitas.graph.channel_splitting import LayerwiseChannelSplitting
+from brevitas.graph.channel_splitting import quant_split_evenly
+from brevitas.graph.equalize import _channel_maxabs
 from brevitas.graph.equalize import _extract_regions
 from brevitas.graph.fixed_point import MergeBatchNorm
 from brevitas.graph.quantize import preprocess_for_quantize
@@ -28,7 +31,6 @@ no_split_models = (
 SPLIT_RATIO = 0.1
 
 
-@pytest.mark.skip()
 @pytest.mark.parametrize('split_input', [False, True])
 def test_toymodels(toy_model, split_input, request):
     model_name = request.node.callspec.id.split('-')[0]
@@ -81,7 +83,6 @@ def test_toymodels(toy_model, split_input, request):
             assert not torch.equal(old_state_dict[weight_name], model.state_dict()[weight_name])
 
 
-@pytest.mark.skip()
 @pytest.mark.parametrize('split_input', [False, True])
 def test_torchvision_models(model_coverage: tuple, split_input: bool, request):
     model_name = request.node.callspec.id.split('-')[0]
@@ -205,3 +206,145 @@ def test_quant_model(toy_model, request):
             weight_name = module + '.weight'
             assert not torch.equal(
                 old_state_dict[weight_name], quant_model.state_dict()[weight_name])
+
+
+def test_toymodels_layerwise_split(toy_model, request):
+    model_name = request.node.callspec.id.split('-')[0]
+
+    torch.manual_seed(SEED)
+
+    model_class = toy_model
+    model = model_class()
+    if 'mha' in model_name:
+        inp = torch.randn(IN_SIZE_LINEAR)
+    else:
+        inp = torch.randn(IN_SIZE_CONV)
+
+    model.eval()
+    expected_out = model(inp)
+
+    model = symbolic_trace(model)
+    # merge BN before applying channel splitting
+    model = MergeBatchNorm().apply(model)
+
+    # apply layerwise channel splitting
+    model = LayerwiseChannelSplitting(split_criterion_func=_channel_maxabs).apply(model)
+
+    out = model(inp)
+
+    assert torch.allclose(expected_out, out, atol=ATOL)
+
+
+def test_quant_toymodels_layerwise_split(toy_model, request):
+    model_name = request.node.callspec.id.split('-')[0]
+
+    torch.manual_seed(SEED)
+
+    model_class = toy_model
+    model = model_class()
+    if 'mha' in model_name:
+        pytest.skip('MHA not supported with this quantization method')
+    else:
+        inp = torch.randn(IN_SIZE_CONV)
+
+    model.eval()
+
+    # preprocess model for quantization, like merge BN etc.
+    model = preprocess_for_quantize(model)
+    # quantize model pretty basic
+    quant_model = quantize_model(
+        model,
+        backend='layerwise',
+        weight_bit_width=8,
+        act_bit_width=8,
+        bias_bit_width=32,
+        scale_factor_type='float_scale',
+        weight_narrow_range=False,
+        weight_param_method='mse',
+        weight_quant_granularity='per_channel',
+        weight_quant_type='sym',
+        layerwise_first_last_bit_width=8,
+        act_param_method='stats',
+        act_quant_percentile=99.999,
+        act_quant_type='sym',
+        quant_format='int')
+
+    expected_out = quant_model(inp)
+
+    # apply layerwise channel splitting
+    model = LayerwiseChannelSplitting(
+        split_criterion_func=_channel_maxabs,
+        quant_split_func=quant_split_evenly).apply(quant_model)
+
+    out = quant_model(inp)
+
+    assert torch.allclose(expected_out, out, atol=0.01)
+
+
+def test_torchvision_models_layerwise_split(model_coverage: tuple, request):
+    model_name = request.node.callspec.id.split('-')[0]
+
+    model, coverage = model_coverage
+
+    torch.manual_seed(SEED)
+    inp = torch.randn(IN_SIZE_CONV)
+
+    model.eval()
+    expected_out = model(inp)
+
+    model = symbolic_trace(model)
+    # merge BN before applying channel splitting
+    model = MergeBatchNorm().apply(model)
+
+    # apply layerwise channel splitting
+    model = LayerwiseChannelSplitting(split_criterion_func=_channel_maxabs).apply(model)
+
+    out = model(inp)
+    assert torch.allclose(expected_out, out, atol=ATOL)
+
+
+def test_quant_torchvision_models_layerwise_split(model_coverage: tuple, request):
+    model_name = request.node.callspec.id.split('-')[0]
+
+    model, coverage = model_coverage
+
+    torch.manual_seed(SEED)
+    inp = torch.randn(IN_SIZE_CONV)
+
+    if 'mha' in model_name:
+        pytest.skip('MHA not supported with this quantization method')
+    else:
+        inp = torch.randn(IN_SIZE_CONV)
+
+    model.eval()
+
+    # preprocess model for quantization, like merge BN etc.
+    model = preprocess_for_quantize(model)
+    # quantize model pretty basic
+    quant_model = quantize_model(
+        model,
+        backend='layerwise',
+        weight_bit_width=8,
+        act_bit_width=8,
+        bias_bit_width=32,
+        scale_factor_type='float_scale',
+        weight_narrow_range=False,
+        weight_param_method='mse',
+        weight_quant_granularity='per_channel',
+        weight_quant_type='sym',
+        layerwise_first_last_bit_width=8,
+        act_param_method='stats',
+        act_quant_percentile=99.999,
+        act_quant_type='sym',
+        quant_format='int')
+
+    expected_out = quant_model(inp)
+
+    # apply layerwise channel splitting
+    model = LayerwiseChannelSplitting(
+        split_criterion_func=_channel_maxabs,
+        quant_split_func=quant_split_evenly).apply(quant_model)
+
+    out = quant_model(inp)
+
+    assert torch.allclose(expected_out, out, atol=0.1)

@@ -6,19 +6,22 @@ from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 
 from brevitas.fx import GraphModule
+from brevitas.fx import Node
 from brevitas.graph.base import GraphTransform
+from brevitas.graph.base import ModuleInstanceToModuleInstance
 from brevitas.graph.equalize import _channel_maxabs
 from brevitas.graph.equalize import _extract_regions
 from brevitas.graph.equalize import _get_input_axis
 from brevitas.graph.equalize import _get_output_axis
 from brevitas.graph.equalize import Region
 from brevitas.graph.equalize import transpose
+from brevitas.graph.utils import get_module
 from brevitas.nn.mixin.base import QuantLayerMixin
+from brevitas.nn.split_layer import ChannelSplitModule
 
-__all__ = ['GraphChannelSplitting']
+__all__ = ['GraphChannelSplitting', 'LayerwiseChannelSplitting']
 
 _conv = (
     nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d)
@@ -143,7 +146,7 @@ def _split_quantized_channels(
         if bias is not None and not split_input:
             bias_to_split = bias[id]
         else:
-            bias_to_split = None
+            bias_to_split = torch.tensor(0.)
         # split channel/scale/zero_point/bias based on user defined method, i.e. halfing it, duplicating it
         split_values = split_func(
             channel_to_split, scale_to_split, zero_point_to_split, bias_to_split, module)
@@ -456,7 +459,7 @@ class GraphChannelSplitting(GraphTransform):
     def __init__(
         self,
         split_input: bool = True,
-        split_criterion_func: Callable = compressibility_loss,
+        split_criterion_func: Callable[[torch.Tensor, int], torch.Tensor] = compressibility_loss,
         quant_split_func: Callable = quant_split_quant_error,
         layer_split_perc_func: Optional[Callable[[nn.Module], float]] = lambda x: 0.02,
         region_filter_func: Optional[Callable[[List[nn.Module], List[nn.Module]],
@@ -489,3 +492,71 @@ class GraphChannelSplitting(GraphTransform):
             return model, regions
         else:
             return model
+
+
+def a2q_layer_filter_fnc(layer: nn.Module) -> bool:
+    if isinstance(layer, nn.Conv2d):
+        # Assuming the first layer is the only layer with 3 input channels
+        if layer.in_channels == 3:
+            return False
+    elif isinstance(layer, nn.Linear):
+        # Assuming that the last linear layer has 1000 output features
+        if layer.out_features == 1000:
+            return False
+    return True
+
+
+class LayerwiseChannelSplitting(GraphTransform):
+
+    def __init__(
+            self,
+            quant_split_func: Optional[Callable] = quant_split_quant_error,
+            split_criterion_func: Optional[Callable[[torch.Tensor, int],
+                                                    torch.Tensor]] = compressibility_loss,
+            layer_split_perc_func: Optional[Callable[[nn.Module], float]] = lambda x: 0.02,
+            layer_filter_func: Optional[Callable[[nn.Module], bool]] = a2q_layer_filter_fnc):
+        super(LayerwiseChannelSplitting, self).__init__()
+
+        self.layer_split_perc_func = layer_split_perc_func
+        self.split_criterion_func = split_criterion_func
+        self.quant_split_func = quant_split_func
+        self.layer_filter_func = layer_filter_func
+
+    def _is_supported_module(self, graph_model: GraphModule, node: Node) -> bool:
+        if node.op == 'call_module':
+            module = get_module(graph_model, node.target)
+            if _is_groupwise(module) or _is_mha(module):
+                # groupwise and mha not supported
+                return False
+            # so far, only Conv2d and linear layers are supported, and filter based on user method
+            if isinstance(module, (nn.Conv2d, nn.Linear)) and self.layer_filter_func(module):
+                return True
+        return False
+
+    def apply(self, graph_model: GraphModule):
+        split_modules = {}
+        for node in graph_model.graph.nodes:
+            if self._is_supported_module(graph_model, node):
+                module = get_module(graph_model, node.target)
+                # we only split input channels
+                channels_to_split = _channels_to_split(
+                    None, [module],
+                    layer_split_perc_func=self.layer_split_perc_func,
+                    split_input=True,
+                    split_criterion_func=self.split_criterion_func)
+                # split the channels in the module
+                _split_channels(
+                    module,
+                    channels_to_split,
+                    split_input=True,
+                    quant_split_func=self.quant_split_func)
+                # add node to split modules
+                split_modules[module] = channels_to_split
+
+        for module, channels_to_split in split_modules.items():
+            dim = 1 if isinstance(module, _conv) else -1
+            rewriter = ModuleInstanceToModuleInstance(
+                module, ChannelSplitModule(module, channels_to_split, dim))
+            rewriter.apply(graph_model)
+
+        return graph_model
