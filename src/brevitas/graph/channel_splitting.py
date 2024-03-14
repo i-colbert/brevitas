@@ -27,8 +27,8 @@ _unsupported_layers = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.LayerN
 
 
 # example quant split function
-def quant_split_evenly(channel, scale, zero_point, module):
-    return channel / 2., channel / 2., scale, scale, zero_point, zero_point
+def quant_split_evenly(channel, scale, zero_point, bias, module):
+    return channel / 2., channel / 2., scale, scale, zero_point, zero_point, bias / 2., bias / 2.
 
 
 def compressibility_loss(inp: torch.Tensor, dim: int = 1) -> torch.Tensor:
@@ -383,7 +383,7 @@ def _split(
         layer_split_perc_func: Callable,
         split_input: bool,
         quant_split_func: Callable = quant_split_quant_error,
-        split_criterion_func: Callable = _channel_maxabs) -> GraphModule:
+        split_criterion_func: Callable = compressibility_loss) -> GraphModule:
     for i, region in enumerate(regions):
         sources = [region.get_module_from_name(src) for src in region.srcs_names]
         sinks = [region.get_module_from_name(sink) for sink in region.sinks_names]
@@ -418,7 +418,7 @@ def _clean_regions(regions: List[Region], region_filter_func: Callable) -> List[
     regions_to_del = set()
     source_modules = dict()
     sink_modules = dict()
-    for i, region in enumerate(tqdm(regions)):
+    for i, region in enumerate(regions):
         sources = [region.get_module_from_name(src) for src in region.srcs_names]
         sinks = [region.get_module_from_name(sink) for sink in region.sinks_names]
 

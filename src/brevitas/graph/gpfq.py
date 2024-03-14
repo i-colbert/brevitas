@@ -253,14 +253,14 @@ class GPFQ(GPxQ):
         self.float_input = self.float_input.to(dev)
         self.quantized_input = self.quantized_input.to(dev)
         # We don't need full Hessian, we just need the diagonal
-        self.H_diag = self.quantized_input.transpose(2, 1).square().sum(
-            2)  # summing over Batch dimension
+        H_diag = self.quantized_input.transpose(2,
+                                                1).square().sum(2)  # summing over Batch dimension
         permutation_list = []
         for group_index in range(self.groups):
             if self.act_order:
                 # Re-order Hessian_diagonal so that weights associated to
                 # higher magnitude activations are quantized first
-                perm = torch.argsort(self.H_diag[group_index, :], descending=True)
+                perm = torch.argsort(H_diag[group_index, :], descending=True)
             else:
                 # No permutation, permutation tensor is a ordered index
                 perm = torch.tensor(range(weight.shape[-1]), device=dev)
@@ -347,14 +347,14 @@ class GPFA2Q(GPFQ):
         z = torch.zeros(weight.shape[:-1], device=dev)
 
         # We don't need full Hessian, we just need the diagonal
-        self.H_diag = self.quantized_input.transpose(2, 1).square().sum(
-            2)  # summing over Batch dimension
+        H_diag = self.quantized_input.transpose(2,
+                                                1).square().sum(2)  # summing over Batch dimension
         permutation_list = []
         for group_index in range(self.groups):
             if self.act_order:
                 # Re-order Hessian_diagonal so that weights associated to
                 # higher magnitude activations are quantized first
-                perm = torch.argsort(self.H_diag[group_index, :], descending=True)
+                perm = torch.argsort(H_diag[group_index, :], descending=True)
             else:
                 # No permutation, permutation tensor is a ordered index
                 perm = torch.tensor(range(weight.shape[-1]), device=dev)
