@@ -103,7 +103,7 @@ OPTIONS_DEFAULT = {
     'gpfq': [False],  # Enable/Disable GPFQ
     'gpfa2q': [False],  # Enable/Disable GPFA2Q
     'gpfq_p': [1.0],  # GPFQ P
-    'gpxq_act_order': [False],  # Use act_order euristics for GPxQ
+    'gpxq_act_order': [True],  # Use act_order euristics for GPxQ
     'accumulator_bit_width': [16],  # Accumulator bit width, only in combination with GPFA2Q
     'act_quant_percentile': [99.999],  # Activation Quantization Percentile
     'uint_sym_act_for_unsigned_values': [True],  # Whether to use unsigned act quant when possible
@@ -170,7 +170,6 @@ def ptq_torchvision_models(args):
             configs.append(hashabledict(**config_namespace.__dict__))
 
     configs = unique(configs)
-    print(f'length of configs: {len(configs)}')
 
     if args.idx > len(configs) - 1:
         return
@@ -220,7 +219,9 @@ def ptq_torchvision_models(args):
             equalize_iters=config_namespace.graph_eq_iterations,
             equalize_merge_bias=config_namespace.graph_eq_merge_bias,
             merge_bn=config_namespace.merge_bn,
-            channel_splitting_ratio=config_namespace.quant_channel_splitting_ratio,
+            apply_channel_splitting=config_namespace.channel_splitting_ratio > 0,
+            channel_splitting_layer_split_perc_func=lambda x: config_namespace.
+            channel_splitting_ratio,
             channel_splitting_split_input=config_namespace.split_input)
     else:
         raise RuntimeError(f"{config_namespace.target_backend} backend not supported.")
@@ -265,13 +266,12 @@ def ptq_torchvision_models(args):
         cudnn.benchmark = False
 
     # apply channel splitting here after quantizing the model
-    if config_namespace.channel_splitting_ratio > 0:
-        print("Applying Channel Splitting:")
+    if config_namespace.quant_channel_splitting_ratio > 0:
+        print("Applying Quant Channel Splitting...")
         # or supply function to split individual layers differently
         quant_model = GraphChannelSplitting(
-            region_filter_func=lambda x,
-            y: True,
-            layer_split_perc_func=lambda x: config_namespace.quant_channel_splitting_ratio,
+            region_filter_func=(lambda x, y: True),
+            layer_split_perc_func=(lambda x: config_namespace.quant_channel_splitting_ratio),
             split_input=config_namespace.split_input).apply(quant_model)
 
     # Calibrate the quant_model on the calibration dataloader
