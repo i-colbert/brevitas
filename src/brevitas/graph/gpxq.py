@@ -18,6 +18,7 @@ from brevitas.graph.calibrate import disable_return_quant_tensor
 from brevitas.graph.calibrate import DisableEnableQuantization
 from brevitas.graph.calibrate import restore_return_quant_tensor
 import brevitas.nn as qnn
+from brevitas.nn.split_layer import ChannelSplitModule
 
 SUPPORTED_CONV_OP = (
     qnn.QuantConv1d,
@@ -189,7 +190,7 @@ class GPxQ(ABC):
 
     def __init__(
             self, layer, name, act_order, len_parallel_layers=1, create_weight_orig=True) -> None:
-        self.layer = layer
+        self.layer = layer.layer if isinstance(layer, ChannelSplitModule) else layer
         self.name = name
         self.act_order = act_order
 
