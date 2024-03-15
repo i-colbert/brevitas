@@ -43,11 +43,22 @@ def quant_split_quant_error(channel, scale, zero_point, bias, module):
     bit_width = module.weight_quant.bit_width()
     int_threshold = module.weight_quant.tensor_quant.int_scaling_impl(bit_width)
     # TODO: insert assertion about the int_quant
-    split_channel = channel - module.weight_quant.tensor_quant.int_quant(
+    channel_0: torch.Tensor = module.weight_quant.tensor_quant.int_quant(
         scale / int_threshold, zero_point, bit_width, channel)
+    channel_1 = channel - channel_0
     # leaving scales untouched and initializing bias 1:0
-    device = bias.device if bias is not None else 'cpu'
-    return channel, split_channel, scale, scale, zero_point, zero_point, bias, torch.tensor(0.0, device=device)
+    device = bias.device if bias is not None else "cpu"
+    assert torch.allclose(channel_0 + channel_1, channel)
+    return (
+        channel_0.clone(),
+        channel_1.clone(),
+        scale,
+        scale,
+        zero_point,
+        zero_point,
+        bias,
+        torch.tensor(0.0, device=device),
+    )
 
 
 def quant_duplicate_input(channel, scale, zero_point, bias, module):
