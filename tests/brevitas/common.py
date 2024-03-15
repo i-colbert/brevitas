@@ -22,3 +22,23 @@ def assert_zero_or_none(value):
         assert (value == torch.tensor(0.)).all()
     else:
         assert value is None
+
+
+def get_weight_per_layer(state_dict):
+    weight_per_layer = {}
+    for key, value in state_dict.items():
+        key_split = key.split('.')
+        if 'weight' in key_split:
+            weight_per_layer[key_split[0]] = value
+
+    return weight_per_layer
+
+
+def get_l1_norm_per_oc_layer(weight_per_layer):
+    l1_per_oc_per_layer = {}
+    for key, value in weight_per_layer.items():
+        # flatten
+        value = value.reshape(value.size(0), -1)
+        l1_per_oc_per_layer[key] = torch.linalg.norm(value, ord=1, dim=1)  # 1 dim for OC
+
+    return l1_per_oc_per_layer

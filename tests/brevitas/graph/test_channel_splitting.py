@@ -14,6 +14,8 @@ from brevitas.graph.fixed_point import MergeBatchNorm
 from brevitas.graph.quantize import preprocess_for_quantize
 from brevitas_examples.imagenet_classification.ptq.ptq_common import quantize_model
 
+from ..common import get_l1_norm_per_oc_layer
+from ..common import get_weight_per_layer
 from .equalization_fixtures import *
 
 no_split_models = (
@@ -129,7 +131,7 @@ def test_torchvision_models(model_coverage: tuple, split_input: bool, request):
 
 
 @pytest.mark.parametrize('split_input', [False, True])
-def test_quant_model(toy_model, split_input, request):
+def test_quant_toymodels(toy_model, split_input, request):
     model_name = request.node.callspec.id.split('-')[0]
 
     torch.manual_seed(SEED)
@@ -167,6 +169,12 @@ def test_quant_model(toy_model, split_input, request):
 
     # save model's state dict to check if channel splitting was done or not
     old_state_dict = quant_model.state_dict()
+
+    # get all relevant weights
+    weight_per_layer = get_weight_per_layer(old_state_dict)
+    # get l1 norms per oc per layer
+    l1_per_oc_per_layer = get_l1_norm_per_oc_layer(weight_per_layer)
+
     # quant_regions should be the same
     quant_regions = _extract_regions(quant_model)
     quant_regions = _clean_regions(quant_regions, region_filter_func=lambda x, y: True)
@@ -183,6 +191,17 @@ def test_quant_model(toy_model, split_input, request):
             quant_regions,
             split_input=split_input,
             layer_split_perc_func=lambda x: SPLIT_RATIO)
+
+        # check that if we split_input, the L1 norm along output channels shouldn't have increased
+        split_state_dict = quant_model.state_dict()
+        # get all relevant weights
+        split_weight_per_layer = get_weight_per_layer(split_state_dict)
+        # get l1 norms per oc per layer
+        split_l1_per_oc_per_layer = get_l1_norm_per_oc_layer(split_weight_per_layer)
+        if split_input:
+            for key, value in split_l1_per_oc_per_layer.items():
+                old_l1 = l1_per_oc_per_layer[key]
+                assert torch.allclose(old_l1, value[:old_l1.shape[0]], atol=0.01)
 
         out = quant_model(inp)
         # checking if the outputs are all close, doesn't work for split_input = True
