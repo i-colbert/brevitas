@@ -47,7 +47,7 @@ def quant_split_quant_error(channel, scale, zero_point, bias, module):
         scale / int_threshold, zero_point, bit_width, channel)
     # leaving scales untouched and initializing bias 1:0
     device = bias.device if bias is not None else 'cpu'
-    return channel.clone(), split_channel, scale, scale, zero_point, zero_point, bias, torch.tensor(0.0, device=device)
+    return channel, split_channel, scale, scale, zero_point, zero_point, bias, torch.tensor(0.0, device=device)
 
 
 def quant_duplicate_input(channel, scale, zero_point, bias, module):
@@ -79,8 +79,10 @@ def _channels_to_split(
         # transpose to have axis as first dimension
         weight_t = transpose(module.weight, axis)
         # flatten all but first dimension and get max per channel
-        max_per_channel = split_criterion_func(weight_t.reshape(weight_t.size(0), -1))
-        channels_sorted = torch.argsort(max_per_channel, descending=True)
+        weight_t = weight_t.reshape(weight_t.size(0), -1)
+        # order values based on criterion
+        values_sorted = split_criterion_func(weight_t)
+        channels_sorted = torch.argsort(values_sorted, descending=True)
         all_channels.append(channels_sorted[:splits_per_layer])
 
     # return tensor with the unique indices to split
@@ -102,114 +104,93 @@ def _split_quantized_channels(
     bias = module.bias.data if module.bias is not None else None
     num_added_channels = len(channels_to_split)
 
-    _get_axis = _get_input_axis if split_input else _get_output_axis
-    axis = _get_axis(module)
+    ic_axis = _get_input_axis(module)
+    oc_axis = _get_output_axis(module)
+    axis = ic_axis if split_input else oc_axis
     # save shape of the module weights
-    orig_shape = list(weight.shape)
-    weight_t = transpose(weight, axis)
-    # flatten to 2d
-    weight_t = weight_t.reshape(weight_t.size(0), -1)
+    weight_shape = list(weight.shape)
 
     # check for per_channel quantization
     is_per_channel_quant = False
     is_asym_quant = False
     # we can only split scales etc. for output channels, so check if we are splitting output
-    if not split_input and module.weight_quant.scale().shape[axis] == orig_shape[axis]:
+    if module.weight_quant.scale().shape[oc_axis] == weight_shape[oc_axis]:
         is_per_channel_quant = True
         # if scales are in the log domain, then arithmetic manipulations need to take that into account
-        scales = module.weight_quant.tensor_quant.scaling_impl(weight_t)
-        orig_scales_shape = scales.shape
-        # get view of scales
-        scales_t = transpose(scales, axis)
-        # flatten to 2d
-        scales_t = scales_t.reshape(scales_t.size(0), -1)
+        scales = module.weight_quant.tensor_quant.scaling_impl(weight)
         try:
             # get zero_points, for sym quantization the zero point is 1D
-            if module.weight_quant.tensor_quant.zero_point_impl.value.shape == orig_scales_shape:
+            if module.weight_quant.tensor_quant.zero_point_impl.value.shape == scales.shape:
                 is_asym_quant = True
                 zero_points = module.weight_quant.tensor_quant.zero_point_impl.value.data
-                # get view of scales
-                zero_points_t = transpose(zero_points, axis)
-                # flatten to 2d
-                zero_points_t = zero_points_t.reshape(zero_points_t.size(0), -1)
         except AttributeError:
             # nothing to do with the zero points, that's 0 anyways
             pass
     for id in channels_to_split:
         # get channel to split
-        channel_to_split = weight_t[id, :]
+        channel_to_split = weight.index_select(dim=axis, index=id)
         # get scale for channel
-        scale_to_split = scales_t[id] if is_per_channel_quant else module.weight_quant.scale()
+        scale_to_split = scales.index_select(dim=axis, index=id) if not split_input else scales
         # get zero point
-        zero_point_to_split = zero_points[id] if is_asym_quant else torch.tensor(0.)
+        zero_point_to_split = zero_points.index_select(
+            dim=axis, index=id) if is_asym_quant else torch.tensor(0.)
         # get bias
         if bias is not None and not split_input:
             bias_to_split = bias[id]
         else:
             bias_to_split = torch.tensor(0.)
-        # split channel/scale/zero_point/bias based on user defined method, i.e. halfing it, duplicating it
+        # split channel/scale/zero_point/bias based on custom method, i.e. halfing/duplicating it
         split_values = split_func(
             channel_to_split, scale_to_split, zero_point_to_split, bias_to_split, module)
         assert len(split_values) == 8, 'split method needs to return 8 values: 2x channel, 2x scale, 2x zero_point, 2x bias'
         # unpack all split_values
         split_channel_0, split_channel_1, split_scale_0, split_scale_1, zero_point_0, zero_point_1, split_bias_0, split_bias_1 = split_values
-        # set original channel to split_channel_0 and then stack the second channel
-        weight_t[id, :] = split_channel_0
-        # expand so we can stack
-        split_channel_1 = split_channel_1.expand(1, split_channel_1.size(0))
-        weight_t = torch.cat([weight_t, split_channel_1], dim=0)
+        # set orig channel to split_channel_0 using fill & add since no counterpart to index_select
+        weight = weight.index_fill(dim=axis, index=id, value=0.0)
+        weight = weight.index_add(dim=axis, index=id, source=split_channel_0)
+        # stack the second channel
+        weight = torch.cat([weight, split_channel_1], dim=axis)
 
         # if per_channel quant, we need to create a new scale for the added channel
-        if is_per_channel_quant:
-            scales_t[id] = split_scale_0
-            split_scale_1 = split_scale_1.unsqueeze(0)
-            # stacking the newly created scale
-            scales_t = torch.cat([scales_t, split_scale_1], dim=0)
+        if is_per_channel_quant and not split_input:
+            scales = scales.index_fill(dim=oc_axis, index=id, value=0.0)
+            scales = scales.index_add(dim=oc_axis, index=id, source=split_scale_0)
+            # stacking the newly created scale, always per OC
+            scales = torch.cat([scales, split_scale_1], dim=oc_axis)
 
         # zero points in case of asym
         if is_asym_quant:
-            zero_points[id] = zero_point_0
-            zero_point_1 = zero_point_1.unsqueeze(0)
-            zero_points = torch.cat([zero_points, zero_point_1], dim=0)
+            zero_points = zero_points.index_fill(dim=oc_axis, index=id, value=0.0)
+            zero_points = zero_points.index_add(dim=oc_axis, index=id, source=zero_point_0)
+            zero_points = torch.cat([zero_points, zero_point_1], dim=oc_axis)
 
         if bias is not None and not split_input:
             bias[id] = split_bias_0
             split_bias_1 = split_bias_1.unsqueeze(0)
             bias = torch.cat([bias, split_bias_1], dim=0)
 
-    # reshape weight_t back to orig shape with the added channels
-    del orig_shape[axis]
-    weight_t = weight_t.reshape(weight_t.size(0), *orig_shape)
-    weight_t = transpose(weight_t, axis)
-    module.weight.data = weight_t.clone().contiguous()
+    # set weights to module's weights
+    module.weight.data = weight.clone().contiguous()
 
     if bias is not None:
         module.bias.data = bias.clone().contiguous()
 
-    if is_per_channel_quant:
-        # we don't care about the axis dim, we need all other dim for reshaping later
-        orig_scales_shape = list(orig_scales_shape)
-        del orig_scales_shape[axis]
-        # reshape scale back to orig shape, with adapted dim for split scales
-        scales_t = scales_t.reshape(scales_t.size(0), *orig_scales_shape)
-        scales_t = transpose(scales_t, axis)
+    if is_per_channel_quant and not split_input:
         # set value for scaling_impl to scales
         scaling_impl = module.weight_quant.tensor_quant.scaling_impl
         try:
-            scales_t = scaling_impl.restrict_clamp_scaling.restrict_value_impl.restrict_init_tensor(
-                scales_t)
+            scales = scaling_impl.restrict_clamp_scaling.restrict_value_impl.restrict_init_tensor(
+                scales)
         except AttributeError:
             # no restrict_clamp_scaling, so pass
             pass
         finally:
             # TODO: this is the wrong attribute to set, ask Giuseppe for the right place to set them to
-            module.weight_quant.tensor_quant.scaling_impl.value.data = scales_t.clone().contiguous()
+            module.weight_quant.tensor_quant.scaling_impl.value.data = scales.clone().contiguous()
 
     if is_asym_quant:
-        # set zero_points to module, reshape using scales shape as it's the same
-        zero_points_t = zero_points_t.reshape(zero_points_t.size(0), *orig_scales_shape)
-        zero_points_t = transpose(zero_points_t, axis)
-        module.weight_quant.tensor_quant.zero_point_impl.value.data = zero_points_t.clone(
+        # set zero_points to module
+        module.weight_quant.tensor_quant.zero_point_impl.value.data = zero_points.clone(
         ).contiguous()
 
     if isinstance(module, _conv):
