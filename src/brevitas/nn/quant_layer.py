@@ -121,9 +121,15 @@ class QuantWeightBiasInputOutputLayer(QuantBiasMixin, QuantWeightMixin, QuantInp
 
     def quant_output_scale_impl(
             self, inp: Tensor, quant_input_scale: Tensor, quant_weight_scale: Tensor):
-        output_scale_shape = compute_channel_view_shape(inp, channel_dim=1)
-        output_scale = quant_weight_scale.view(output_scale_shape)
-        output_scale = output_scale * quant_input_scale.view(output_scale_shape)
+        channel_dim = -1 if isinstance(self, torch.nn.Linear) else 1
+        output_scale_shape = compute_channel_view_shape(inp, channel_dim=channel_dim)
+
+        if len(quant_weight_scale.shape) == 0:
+            quant_weight_scale = quant_weight_scale.view(output_scale_shape)
+        if len(quant_input_scale.shape) == 0:
+            quant_input_scale = quant_input_scale.view(output_scale_shape)
+
+        output_scale = quant_weight_scale * quant_input_scale
         return output_scale
 
     @property
