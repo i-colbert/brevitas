@@ -128,6 +128,8 @@ class QuantWeightBiasInputOutputLayer(QuantBiasMixin, QuantWeightMixin, QuantInp
             quant_weight_scale = quant_weight_scale.view(output_scale_shape)
         if len(quant_input_scale.shape) == 0:
             quant_input_scale = quant_input_scale.view(output_scale_shape)
+        elif len(quant_weight_scale.shape) != 0:
+            quant_weight_scale = quant_weight_scale.view(output_scale_shape)
 
         output_scale = quant_weight_scale * quant_input_scale
         return output_scale
