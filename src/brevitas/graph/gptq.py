@@ -23,6 +23,7 @@ from brevitas.graph.gpxq import gpxq_mode
 from brevitas.graph.gpxq import StopFwdException
 from brevitas.graph.gpxq import SUPPORTED_CONV_OP
 import brevitas.nn as qnn
+from brevitas.quant_tensor import _unpack_quant_tensor
 from brevitas.quant_tensor import QuantTensor
 
 
@@ -68,6 +69,7 @@ class GPTQ(GPxQ):
         # Update reference to current layer
         current_layer.layer_names.add(self.name)
         inp = self.process_input(input)
+        inp = _unpack_quant_tensor(inp)
         batch_size = inp.shape[0]
 
         # Preprocess the input to compute the Hessian
