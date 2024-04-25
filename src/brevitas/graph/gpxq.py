@@ -18,6 +18,7 @@ from brevitas.graph.calibrate import disable_return_quant_tensor
 from brevitas.graph.calibrate import DisableEnableQuantization
 from brevitas.graph.calibrate import restore_return_quant_tensor
 import brevitas.nn as qnn
+from brevitas.quant_tensor import _unpack_quant_tensor
 
 SUPPORTED_CONV_OP = (
     qnn.QuantConv1d,
@@ -221,6 +222,8 @@ class GPxQ(ABC):
     def process_input(self, inp):
         # Input is a tuple, so we take first element
         inp = inp[0]
+        inp = self.layer.input_quant(inp)
+        inp = _unpack_quant_tensor(inp)
 
         # If input is unbatched, add batch_size = 1
         if len(inp.shape) == 1:

@@ -232,7 +232,6 @@ class A2GPTQ(GPTQ):
 
     def process_input(self, inp):
         inp = super().process_input(inp)
-        inp = self.layer.input_quant(inp)
 
         is_quant_enabled = self.layer.weight_quant.is_quant_enabled
 
