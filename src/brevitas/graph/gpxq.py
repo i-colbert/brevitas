@@ -222,8 +222,6 @@ class GPxQ(ABC):
     def process_input(self, inp):
         # Input is a tuple, so we take first element
         inp = inp[0]
-        inp = self.layer.input_quant(inp)
-        inp = _unpack_quant_tensor(inp)
 
         # If input is unbatched, add batch_size = 1
         if len(inp.shape) == 1:
@@ -235,6 +233,9 @@ class GPxQ(ABC):
             batch_dim = inp.names.index('N')
             inp.rename_(None)
             inp = inp.transpose(0, batch_dim)
+
+        inp = self.layer.input_quant(inp)
+        inp = _unpack_quant_tensor(inp)
         return inp
 
     @abstractmethod
