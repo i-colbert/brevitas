@@ -20,8 +20,9 @@ from brevitas.graph.base import GraphTransform
 from brevitas.graph.base import ModuleInstanceToModuleInstance
 from brevitas.graph.utils import get_module
 from brevitas.graph.utils import get_node
+from brevitas.nn import *
 from brevitas.nn.equalized_layer import EqualizedModule
-from brevitas.nn.equalized_layer import INPUT_NAMES
+from brevitas.nn.quant_layer import QuantWeightBiasInputOutputLayer as QuantWBIOL
 from brevitas.nn.quant_scale_bias import ScaleBias
 from brevitas.utils.torch_utils import KwargsForwardHook
 
@@ -36,11 +37,17 @@ _supported_layers = (
     nn.ConvTranspose1d,
     nn.ConvTranspose2d,
     nn.ConvTranspose3d,
+    QuantConvTranspose1d,
+    QuantConvTranspose2d,
     nn.MultiheadAttention,
+    QuantMultiheadAttention,
     nn.Conv1d,
     nn.Conv2d,
     nn.Conv3d,
+    QuantConv1d,
+    QuantConv2d,
     nn.Linear,
+    QuantLinear,
     nn.LayerNorm,
     nn.BatchNorm1d,
     nn.BatchNorm2d,
@@ -85,6 +92,8 @@ _residual_fns = (torch.add, operator.add, operator.iadd, operator.__add__, opera
 _batch_norm = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)
 
 _ignore_ops = (getattr, 'size')
+
+_quant_modules = (QuantReLU, QuantIdentity, QuantHardTanh, QuantTanh, QuantSigmoid)
 
 
 # Start and End identify the starting and ending channels of the weight matrix that need to be
@@ -188,6 +197,8 @@ def _select_scale_computation_fn(
         return _channel_maxabs
     elif scale_computation_type == 'range':
         return _channel_range
+    elif scale_computation_type == 'avgabs':
+        return _channel_avgabs
     else:
         raise RuntimeError(f"Scale computation type {scale_computation_type} not supported")
 
@@ -247,6 +258,11 @@ def _channel_range(inp: torch.Tensor, dim: int = 1) -> torch.Tensor:
 
 def _channel_maxabs(inp: torch.Tensor, dim: int = 1) -> torch.Tensor:
     out = torch.max(torch.abs(inp), dim=dim)[0]
+    return out
+
+
+def _channel_avgabs(inp: torch.Tensor, dim: int = 1) -> torch.Tensor:
+    out = torch.mean(torch.abs(inp), dim=dim)
     return out
 
 
@@ -381,6 +397,22 @@ def transpose(tensor: torch.Tensor, axis: int):
     return tensor.permute(shape)
 
 
+def _process_weights(m, axis, merge_bias: bool = False, bias_shrinkage: str = "vaiq"):
+    if isinstance(m, QuantWBIOL):
+        assert not m.weight_quant.requires_quant_input, "Error: not supported."
+        q = m.quant_weight()
+        w = q.int().float()
+    else:
+        w = m.weight
+    w = transpose(w, axis)
+    # Determine the srcs_range based on where we are performing activation equalization or
+    # weight equalization
+    if merge_bias:
+        w = _combine_weights_bias(w, bias_shrinkage, m.bias)
+    w = w.cpu()
+    return w
+
+
 def _cross_layer_equalization(
         region: Region,
         merge_bias: bool,
@@ -474,7 +506,7 @@ def _cross_layer_equalization(
         return _no_equalize()
 
     scale_fn = _select_scale_computation_fn(scale_computation_type)
-    sink_weights = {name: transpose(m.weight.cpu(), axis) for name, (m, axis) in sink_axes.items()}
+    sink_weights = {name: _process_weights(m, axis) for name, (m, axis) in sink_axes.items()}
     srcs_range = -1 * torch.ones(max_shape_srcs, device='cpu', dtype=dtype)
     sinks_range = -1 * torch.ones(max_shape_sinks, device='cpu', dtype=dtype)
     for k, v in sink_weights.items():
@@ -489,15 +521,9 @@ def _cross_layer_equalization(
         sinks_range[indexes.offset:indexes.offset + channel_range] = torch.max(
             sinks_range[indexes.offset:indexes.offset + channel_range], weight_range)
 
-    # Determine the srcs_range based on where we are performing activation equalization or
-    # weight equalization
-    if merge_bias:
-        src_weights = {
-            name: _combine_weights_bias(transpose(m.weight, axis), bias_shrinkage, m.bias).cpu()
-            for name, (m, axis) in src_axes.items()}
-    else:
-        src_weights = {
-            name: transpose(m.weight.cpu(), axis) for name, (m, axis) in src_axes.items()}
+    src_weights = {
+        name: _process_weights(m, axis, merge_bias, bias_shrinkage)
+        for name, (m, axis) in src_axes.items()}
     for k, v in src_weights.items():
         # Srcs are always fully equalized, thus we simply need to apply the offset to position them
         # correctly with respect to the other srcs matrices.
@@ -645,9 +671,26 @@ def _is_supported_module(graph_model: GraphModule, node: Node) -> bool:
     return False
 
 
+def _is_quant_module(graph_model: GraphModule, node: Node):
+    module = get_module(graph_model, node.target)
+    return isinstance(module, _quant_modules)
+
+
+def _get_act_impl(graph_module: GraphModule, node: Node):
+    module = get_module(graph_module, node.target)
+    # we know it is a quant module, so just access the proxies
+    # should be the act_quant.fused_activation_quant_proxy.activation_impl
+    return module.act_quant.fused_activation_quant_proxy.activation_impl
+
+
 def _is_scale_invariant_module(graph_model: GraphModule, node: Node) -> bool:
-    return node.op == 'call_module' and isinstance(
-        get_module(graph_model, node.target), _scale_invariant_layers)
+    # if quant module, we need to check the activation impl
+    if node.op == 'call_module':
+        if _is_quant_module(graph_model, node):
+            # if its quant, check the call impl
+            act_impl = _get_act_impl(graph_model, node)
+            return isinstance(act_impl, _scale_invariant_layers)
+        return isinstance(get_module(graph_model, node.target), _scale_invariant_layers)
 
 
 def _is_scale_varying_activation(graph_model, node):
@@ -668,9 +711,12 @@ def _is_reshaping_op(node: Node) -> bool:
 
 def get_weight_source(module):
     transpose = lambda weight, axis: weight if axis == 0 else weight.transpose(0, 1)
-    if isinstance(module, nn.MultiheadAttention) and not hasattr(module, 'out_proj'):
+    if isinstance(
+            module,
+        (nn.MultiheadAttention, QuantMultiheadAttention)) and not hasattr(module, 'out_proj'):
         raise RuntimeError("Configuration for Multiheadattention not supported")
-    weight = module.out_proj.weight if isinstance(module, nn.MultiheadAttention) else module.weight
+    weight = module.out_proj.weight if isinstance(
+        module, (nn.MultiheadAttention, QuantMultiheadAttention)) else module.weight
     axis = _get_output_axis(module)
     weight = transpose(weight, axis)
     return weight
@@ -678,10 +724,16 @@ def get_weight_source(module):
 
 def get_weight_sink(module):
     transpose = lambda weight, axis: weight if axis == 0 else weight.transpose(0, 1)
-    if isinstance(module, nn.MultiheadAttention) and not hasattr(module, 'in_proj_weight'):
-        raise RuntimeError("Configuration for Multiheadattention not supported")
-    weight = WeightBiasWrapper(module.in_proj_weight).weight if isinstance(
-        module, nn.MultiheadAttention) else module.weight
+    if isinstance(module, nn.MultiheadAttention):
+        if not hasattr(module, 'in_proj_weight'):
+            raise RuntimeError("Configuration for Multiheadattention not supported")
+        weight = WeightBiasWrapper(module.in_proj_weight).weight
+    elif isinstance(module, QuantMultiheadAttention):
+        if not hasattr(module.in_proj, 'weight'):
+            raise RuntimeError("Configuration for Multiheadattention not supported")
+        weight = WeightBiasWrapper(module.in_proj.weight).weight
+    else:
+        weight = module.weight
     axis = _get_input_axis(module)
     weight = transpose(weight, axis)
     return weight
@@ -971,7 +1023,8 @@ class ActivationEqualization(GraphTransform, ABC):
                 self.float_act_map[name] = None
                 return
 
-        input_kwarg = [x for x in kwargs.keys() if x in INPUT_NAMES][0]
+        possible_input_kwargs = ['input', 'inp', 'query']
+        input_kwarg = [x for x in kwargs.keys() if x in possible_input_kwargs][0]
         if use_inp:
             x = kwargs[input_kwarg]
         elif not use_inp:
