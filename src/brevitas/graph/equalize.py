@@ -199,6 +199,8 @@ def _select_scale_computation_fn(
         return _channel_range
     elif scale_computation_type == 'avgabs':
         return _channel_avgabs
+    elif scale_computation_type == 'l1-equalization':
+        return _channel_avgabs_normalized
     else:
         raise RuntimeError(f"Scale computation type {scale_computation_type} not supported")
 
@@ -263,6 +265,14 @@ def _channel_maxabs(inp: torch.Tensor, dim: int = 1) -> torch.Tensor:
 
 def _channel_avgabs(inp: torch.Tensor, dim: int = 1) -> torch.Tensor:
     out = torch.mean(torch.abs(inp), dim=dim)
+    return out
+
+
+def _channel_avgabs_normalized(inp: torch.Tensor, dim: int = 1) -> torch.Tensor:
+    _avg = torch.mean(torch.abs(inp), dim=dim)  # average magnitude
+    _max = torch.max(torch.abs(inp), dim=dim)[0]  # scaling factor surrogate
+    _max = torch.where(_max <= EPSILON, torch.tensor(EPSILON).type_as(_max), _max)
+    out = _avg / _max
     return out
 
 
