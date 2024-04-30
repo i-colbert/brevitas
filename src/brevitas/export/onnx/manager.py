@@ -89,7 +89,7 @@ class ONNXBaseManager(BaseManager, ABC):
                 with warnings.catch_warnings():
                     if disable_warnings:
                         warnings.simplefilter("ignore")
-                    training_state = module.training
+                    # training_state = module.training
                     module = module.eval()
                     module.apply(cls.set_export_handler)
                     if input_shape is not None:
@@ -132,7 +132,7 @@ class ONNXBaseManager(BaseManager, ABC):
                     # restore the model to previous properties
                     module.apply(lambda m: _restore_act_caching_mode(m))
                     cls.set_export_mode(module, enabled=False)
-                    module.train(training_state)
+                    # module.train(training_state)
 
                     # do some cleanup on the exported ONNX model
                     if export_path is not None:
