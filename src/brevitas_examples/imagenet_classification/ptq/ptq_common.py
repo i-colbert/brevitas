@@ -399,9 +399,7 @@ def create_quant_maps(
 
     # Layerwise is  basic quant kwargs + input_quant + output_quant
     layerwise_quant_wbiol_kwargs = {
-        **quant_wbiol_kwargs,
-        'input_quant': per_tensor_act_quant,
-        'output_quant': per_tensor_act_quant}
+        **quant_wbiol_kwargs, 'input_quant': per_tensor_act_quant, 'output_quant': sym_act_quant}
 
     layerwise_quant_mha_kwargs = {**quant_mha_kwargs, 'in_proj_input_quant': per_tensor_act_quant}
 
