@@ -26,7 +26,7 @@ def create_validation_dataloader(data, seqlen, device):
     val_dataloader = []
     for i in tqdm(range(nsamples)):
         batch = data['input_ids'][:, (i * seqlen):((i + 1) * seqlen)].to(device)
-        attention_mask = torch.ones_like(batch)
+        attention_mask = torch.ones_like(batch).to(device)
         val_dataloader.append({'input_ids': batch, 'attention_mask': attention_mask})
     return val_dataloader
 
@@ -40,7 +40,7 @@ def model_eval(model, valenc, seqlen):
         nlls = []
         for inps in valenc:
             lm_logits = model(**inps)['logits']
-            shift_logits = lm_logits[:, :-1, :].contiguous()
+            shift_logits = lm_logits[:, :-1, :].contiguous().to(model.device)
             shift_labels = inps['input_ids'][:, 1:].to(model.device)
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
