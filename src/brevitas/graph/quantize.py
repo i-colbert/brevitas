@@ -1,12 +1,15 @@
 # Copyright (C) 2023, Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from copy import deepcopy
+
 from torch import nn
 
 from brevitas import config
 from brevitas.core.scaling.standalone import ConstScaling
 from brevitas.core.scaling.standalone import ParameterScaling
 from brevitas.fx.brevitas_tracer import symbolic_trace
+from brevitas.graph.base import InsertModuleCallAfter
 from brevitas.graph.base import ModuleToModuleByClass
 from brevitas.graph.channel_splitting import GraphChannelSplitting
 from brevitas.graph.equalize import EqualizeGraph
@@ -15,6 +18,8 @@ from brevitas.graph.fixed_point import MergeBatchNorm
 from brevitas.graph.fixed_point import MoveSplitBatchNormBeforeCat
 from brevitas.graph.per_input import AdaptiveAvgPoolToAvgPool
 from brevitas.graph.quantize_impl import act_handler
+from brevitas.graph.quantize_impl import ADD_FNS
+from brevitas.graph.quantize_impl import ADD_METHODS
 from brevitas.graph.quantize_impl import add_output_quant_handler
 from brevitas.graph.quantize_impl import inp_placeholder_handler
 from brevitas.graph.quantize_impl import layer_handler
@@ -31,6 +36,7 @@ from brevitas.quant import Int8ActPerTensorFloat
 from brevitas.quant import Int8ActPerTensorFloatMinMaxInit
 from brevitas.quant import Int8WeightPerTensorFloat
 from brevitas.quant import Int32Bias
+from brevitas.quant import ShiftedUint8ActPerTensorFloatMSE
 from brevitas.quant import Uint8ActPerTensorFloat
 from brevitas.quant import Uint8ActPerTensorFloatMaxInit
 from brevitas.quant.scaled_int import Int8WeightPerTensorFloat
@@ -226,7 +232,10 @@ QUANT_IDENTITY_MAP = {
             'act_quant': Int8ActPerTensorFloat, 'return_quant_tensor': True}),
     'unsigned':
         (qnn.QuantIdentity, {
-            'act_quant': Uint8ActPerTensorFloat, 'return_quant_tensor': True}),}
+            'act_quant': Uint8ActPerTensorFloat, 'return_quant_tensor': True}),
+    'unknown': (
+        qnn.QuantIdentity, {
+            'act_quant': ShiftedUint8ActPerTensorFloatMSE, 'return_quant_tensor': True}),}
 
 
 def align_input_quant(
@@ -367,6 +376,50 @@ def layerwise_quantize(
     model.eval()
     model = layerwise_layer_handler(
         model, layer_map=compute_layer_map, name_blacklist=name_blacklist)
+    model = add_input_quant_handler(model, QUANT_IDENTITY_MAP)
     model.train(training_state)
     config.IGNORE_MISSING_KEYS = ignore_missing_keys_state
+    return model
+
+
+def add_input_quant_handler(model, quant_identity_map):
+    """
+    Check the input of every add node and quantize.
+    """
+
+    rewriters = []
+    for node in model.graph.nodes:
+        if (node.op == "call_function" and node.target in ADD_FNS or
+                node.op == "call_method" and node.target in ADD_METHODS):
+            shared_quant_identity = None
+            for inp_node in node._input_nodes:
+                if shared_quant_identity is None:
+                    quant_module_class, quant_module_kwargs = deepcopy(
+                        quant_identity_map["unknown"]
+                    )
+                    quant_module_kwargs["return_quant_tensor"] = True
+                    shared_quant_identity = quant_module_class(**quant_module_kwargs)
+                    inp_quant_module = shared_quant_identity
+                else:
+                    partial_config = {
+                        "scaling_impl":
+                            shared_quant_identity.act_quant.fused_activation_quant_proxy
+                            .tensor_quant.scaling_impl,
+                        "int_scaling_impl":
+                            shared_quant_identity.act_quant.fused_activation_quant_proxy
+                            .tensor_quant.int_scaling_impl,}
+                    injector = shared_quant_identity.act_quant.quant_injector.let(**partial_config)
+                    inp_quant_module = quant_module_class(
+                        act_quant=injector, return_quant_tensor=True)
+                inp_quant_module_name = inp_node.name + "_output_quant"
+                model.add_module(inp_quant_module_name, inp_quant_module)
+                nodes_to_exclude = [n for n in inp_node.users if n != node]
+                rewriters.append(
+                    InsertModuleCallAfter(
+                        inp_quant_module_name,
+                        inp_node,
+                        node_to_exclude=nodes_to_exclude,
+                    ))
+    for rewriter in rewriters:
+        model = rewriter.apply(model)
     return model
