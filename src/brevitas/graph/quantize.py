@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from copy import deepcopy
+import operator
 
+import torch
 from torch import nn
 
 from brevitas import config
@@ -30,13 +32,11 @@ from brevitas.graph.standardize import DuplicateSharedStatelessModule
 from brevitas.graph.standardize import MeanMethodToAdaptiveAvgPool2d
 from brevitas.graph.standardize import RemoveStochasticModules
 from brevitas.graph.standardize import TorchFunctionalToModule
-from brevitas.nn import quant_layer
 import brevitas.nn as qnn
 from brevitas.quant import Int8ActPerTensorFloat
 from brevitas.quant import Int8ActPerTensorFloatMinMaxInit
 from brevitas.quant import Int8WeightPerTensorFloat
 from brevitas.quant import Int32Bias
-from brevitas.quant import ShiftedUint8ActPerTensorFloatMSE
 from brevitas.quant import Uint8ActPerTensorFloat
 from brevitas.quant import Uint8ActPerTensorFloatMaxInit
 from brevitas.quant.scaled_int import Int8WeightPerTensorFloat
@@ -232,10 +232,10 @@ QUANT_IDENTITY_MAP = {
             'act_quant': Int8ActPerTensorFloat, 'return_quant_tensor': True}),
     'unsigned':
         (qnn.QuantIdentity, {
-            'act_quant': Uint8ActPerTensorFloat, 'return_quant_tensor': True}),
-    'unknown': (
-        qnn.QuantIdentity, {
-            'act_quant': ShiftedUint8ActPerTensorFloatMSE, 'return_quant_tensor': True}),}
+            'act_quant': Uint8ActPerTensorFloat, 'return_quant_tensor': True})}
+
+MUL_FNS = [torch.mul, operator.mul, operator.imul]
+MUL_METHODS = ["mul", "mul_"]
 
 
 def align_input_quant(
@@ -389,14 +389,12 @@ def add_input_quant_handler(model, quant_identity_map):
 
     rewriters = []
     for node in model.graph.nodes:
-        if (node.op == "call_function" and node.target in ADD_FNS or
-                node.op == "call_method" and node.target in ADD_METHODS):
+        if (node.op == "call_function" and node.target in ADD_FNS + MUL_FNS or
+                node.op == "call_method" and node.target in ADD_METHODS + MUL_METHODS):
             shared_quant_identity = None
             for inp_node in node._input_nodes:
                 if shared_quant_identity is None:
-                    quant_module_class, quant_module_kwargs = deepcopy(
-                        quant_identity_map["unknown"]
-                    )
+                    quant_module_class, quant_module_kwargs = deepcopy(quant_identity_map["signed"])
                     quant_module_kwargs["return_quant_tensor"] = True
                     shared_quant_identity = quant_module_class(**quant_module_kwargs)
                     inp_quant_module = shared_quant_identity
