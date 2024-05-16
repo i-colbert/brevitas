@@ -434,6 +434,13 @@ class gptq_mode(gpxq_mode):
         self.a2q_layer_filter_fnc = a2q_layer_filter_fnc  # returns true when to use A2GPTQ
         self.a2q_gptq_class = a2q_gptq_class
 
+    def __enter__(self):
+        self.setup_gpxq_layers()
+        return self.setup_gpxq_hooks()
+
+    def __exit__(self, type, value, traceback):
+        return self.exit()
+
     def catch_stopfwd(self, *args, **kwargs):
         try:
             self.orig_forward(*args, **kwargs)
