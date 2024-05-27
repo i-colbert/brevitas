@@ -14,6 +14,7 @@ from brevitas.graph.calibrate import disable_return_quant_tensor
 from brevitas.graph.calibrate import restore_return_quant_tensor
 from brevitas.graph.gpxq import GPxQ
 from brevitas.graph.gpxq import gpxq_mode
+from brevitas.graph.gpxq import random_projection
 from brevitas.graph.gpxq import StopFwdException
 from brevitas.graph.gpxq import SUPPORTED_CONV_OP
 import brevitas.nn as qnn
@@ -26,7 +27,17 @@ class GPFQ(GPxQ):
     Based on https://github.com/YixuanSeanZhou/Quantized_Neural_Nets/tree/main
     """
 
-    def __init__(self, layer, name, act_order, len_parallel_layers, create_weight_orig, p) -> None:
+    def __init__(
+            self,
+            layer,
+            name,
+            act_order,
+            len_parallel_layers,
+            create_weight_orig,
+            p,
+            use_random_proj,
+            use_random_sampling,
+            target_dim) -> None:
 
         super().__init__(layer, name, act_order, len_parallel_layers, create_weight_orig)
 
@@ -35,6 +46,9 @@ class GPFQ(GPxQ):
         self.index_computed = False
         self.p = p
         self.save_dir = None
+        self.use_random_proj = use_random_proj
+        self.use_random_sampling = use_random_sampling
+        self.target_dim = target_dim
 
     def collect_float_input(self, module, args, output):
         # this is the hook function to collect the float inputs of this layer
@@ -194,24 +208,33 @@ class GPFQ(GPxQ):
                 weight = weight.transpose(1, 0)  # This performs a view
             weight = weight.flatten(1)
         weight = weight.view(self.groups, -1, weight.shape[-1])  # [Groups, OC/Groups, IC]
-        U = torch.zeros(
-            weight.shape[0], weight.shape[1], self.float_input.shape[1], device=dev, dtype=dtype)
+
+        if self.use_random_proj:
+            self.float_input, self.quantized_input = random_projection(self.float_input, self.quantized_input, self.target_dim)
+        elif self.use_random_sampling:
+            # choose random indices and take TARGET_DIM many
+            ind = torch.randint(self.float_input.shape[1], (self.target_dim,))
+            self.float_input = self.float_input.index_select(1, ind.to(dev))
+            self.quantized_input = self.quantized_input.index_select(1, ind.to(dev))
+
         self.float_input = self.float_input.to(dev)
         self.quantized_input = self.quantized_input.to(dev)
+
+        U = torch.zeros(
+            weight.shape[0], weight.shape[1], self.float_input.shape[1], device=dev, dtype=dtype)
         # We don't need full Hessian, we just need the diagonal
-        H_diag = self.quantized_input.transpose(2,
-                                                1).square().sum(2)  # summing over Batch dimension
+        self.H_diag = self.quantized_input.transpose(2, 1).square().sum(
+            2)  # summing over Batch dimension
         permutation_list = []
         for group_index in range(self.groups):
             if self.act_order:
                 # Re-order Hessian_diagonal so that weights associated to
                 # higher magnitude activations are quantized first
-                perm = torch.argsort(H_diag[group_index, :], descending=True)
+                perm = torch.argsort(self.H_diag[group_index, :], descending=True)
             else:
                 # No permutation, permutation tensor is a ordered index
                 perm = torch.tensor(range(weight.shape[-1]), device=dev)
             permutation_list.append(perm)
-        del H_diag  # free memory
         for t in range(weight.shape[-1]):
             for group_index in range(self.groups):
                 U[group_index] += torch.matmul(
@@ -252,7 +275,10 @@ class A2GPFQ(GPFQ):
             len_parallel_layers,
             create_weight_orig,
             accumulator_bit_width,
-            p) -> None:
+            p,
+            use_random_proj,
+            use_random_sampling,
+            target_dim) -> None:
         GPFQ.__init__(
             self,
             layer=layer,
@@ -260,7 +286,10 @@ class A2GPFQ(GPFQ):
             act_order=act_order,
             len_parallel_layers=len_parallel_layers,
             create_weight_orig=create_weight_orig,
-            p=p)
+            p=p,
+            use_random_proj=use_random_proj,
+            use_random_sampling=use_random_sampling,
+            target_dim=target_dim)
         self.accumulator_bit_width = accumulator_bit_width
         assert self.accumulator_bit_width is not None
 
@@ -300,6 +329,14 @@ class A2GPFQ(GPFQ):
                 weight = weight.transpose(1, 0)  # This performs a view
             weight = weight.flatten(1)
         weight = weight.view(self.groups, -1, weight.shape[-1])  # [Groups, OC/Groups, IC]
+
+        if self.use_random_proj:
+            self.float_input, self.quantized_input = random_projection(self.float_input, self.quantized_input, self.target_dim)
+        elif self.use_random_sampling:
+            # choose random indices and take TARGET_DIM many
+            ind = torch.randint(self.float_input.shape[1], (self.target_dim,))
+            self.float_input = self.float_input.index_select(1, ind.to(dev))
+            self.quantized_input = self.quantized_input.index_select(1, ind.to(dev))
 
         self.float_input = self.float_input.to(dev)
         self.quantized_input = self.quantized_input.to(dev)
@@ -414,7 +451,10 @@ class gpfq_mode(gpxq_mode):
             accumulator_bit_width: Optional[int] = None,
             a2q_layer_filter_fnc: Optional[Callable[[nn.Module], bool]] = lambda x: False,
             a2q_gpfq_class: Optional[A2GPFQ] = A2GPFQ,
-            collect_float_first: bool = False) -> None:
+            collect_float_first: bool = False,
+            use_random_proj: bool = False,
+            use_random_sampling: bool = False,
+            target_dim: int = 2048) -> None:
         if not inplace:
             model = deepcopy(model)
         super().__init__(
@@ -435,6 +475,11 @@ class gpfq_mode(gpxq_mode):
 
         # speeding up by collecting float input first so we don't need to do it later
         self.collect_float_first = collect_float_first
+
+        # random proj/sample and target_dim
+        self.use_random_proj = use_random_proj
+        self.use_random_sampling = use_random_sampling
+        self.target_dim = target_dim
 
     def __enter__(self):
         # initialize gpxq layers
@@ -524,11 +569,17 @@ class gpfq_mode(gpxq_mode):
                 len_parallel_layers=len_parallel_layers,
                 create_weight_orig=create_weight_orig,
                 p=self.p,
-                accumulator_bit_width=self.accumulator_bit_width)
+                accumulator_bit_width=self.accumulator_bit_width,
+                use_random_proj=self.use_random_proj,
+                use_random_sampling=self.use_random_sampling,
+                target_dim=self.target_dim)
         return GPFQ(
             layer=layer,
             name=name,
             act_order=act_order,
             len_parallel_layers=len_parallel_layers,
             create_weight_orig=create_weight_orig,
-            p=self.p)
+            p=self.p,
+            use_random_proj=self.use_random_proj,
+            use_random_sampling=self.use_random_sampling,
+            target_dim=self.target_dim)

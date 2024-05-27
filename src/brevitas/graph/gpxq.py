@@ -7,10 +7,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import field
 from functools import partial
+import math
 from operator import attrgetter
 from typing import List, Optional, Set
 import warnings
 
+import torch
 from torch.fx import GraphModule as TorchGraphModule
 
 from brevitas.fx import GraphModule
@@ -304,3 +306,19 @@ class GPxQ(ABC):
         # We need to remove the last dim
         q = q.squeeze(2)  # [groups, OC/groups] or [1, OC]
         return q
+
+
+def random_projection(float_input: torch.Tensor, quantized_input: torch.Tensor, target_dim: int):
+    # use random projection to reduce dimensionality
+    n = quantized_input.size(1)
+    dev = float_input.device
+    # create gaussian random matrix
+    R = torch.normal(mean=0.0, std=1. / math.sqrt(n), size=(target_dim, n), device=dev)
+    quantized_input = torch.transpose(quantized_input, 1, 2) @ R.T
+    float_input = torch.transpose(float_input, 1, 2) @ R.T
+    del R
+    # reshape back
+    quantized_input = torch.transpose(quantized_input, 1, 2)
+    float_input = torch.transpose(float_input, 1, 2)
+
+    return float_input, quantized_input
