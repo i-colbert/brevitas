@@ -76,7 +76,10 @@ class gpxq_mode(ABC):
             create_weight_orig: bool = True,
             use_quant_activations: bool = True,
             act_order: bool = False,
-            return_forward_output: bool = False) -> None:
+            return_forward_output: bool = False,
+            use_random_proj: bool = False,
+            use_random_sampling: bool = False,
+            target_dim: int = 4096) -> None:
 
         if not inplace:
             model = deepcopy(model)
@@ -104,6 +107,11 @@ class gpxq_mode(ABC):
             self.model.__class__.forward = self.catch_stopfwd
         else:
             self.model.forward = self.catch_stopfwd
+
+        # random proj/sample and target_dim
+        self.use_random_proj = use_random_proj
+        self.use_random_sampling = use_random_sampling
+        self.target_dim = target_dim
 
     def _is_module_supported(self, module):
         if isinstance(module, SUPPORTED_CONV_OP):
@@ -201,7 +209,15 @@ class gpxq_mode(ABC):
 class GPxQ(ABC):
 
     def __init__(
-            self, layer, name, act_order, len_parallel_layers=1, create_weight_orig=True) -> None:
+            self,
+            layer,
+            name,
+            act_order,
+            len_parallel_layers=1,
+            create_weight_orig=True,
+            use_random_proj=False,
+            use_random_sampling=False,
+            target_dim=4096) -> None:
         self.layer = layer
         self.name = name
         self.act_order = act_order
@@ -230,6 +246,10 @@ class GPxQ(ABC):
         self.disable_pre_forward_hook = False
         # Some layers require knowledge from quant inputs to compute quant weights
         self.quant_input = None
+
+        self.use_random_proj = use_random_proj
+        self.use_random_sampling = use_random_sampling
+        self.target_dim = target_dim
 
     def process_input(self, inp):
         # Input is a tuple, so we take first element

@@ -47,9 +47,25 @@ class GPTQ(GPxQ):
     """
 
     def __init__(
-            self, layer, name, act_order, len_parallel_layers, create_weight_orig,
-            num_blocks) -> None:
-        super().__init__(layer, name, act_order, len_parallel_layers, create_weight_orig)
+            self,
+            layer,
+            name,
+            act_order,
+            len_parallel_layers,
+            create_weight_orig,
+            num_blocks,
+            use_random_proj,
+            use_random_sampling,
+            target_dim) -> None:
+        super().__init__(
+            layer,
+            name,
+            act_order,
+            len_parallel_layers,
+            create_weight_orig,
+            use_random_proj,
+            use_random_sampling,
+            target_dim)
 
         # Define how many columns to update in each mini-block
         self.blocksize = math.ceil(self.columns / num_blocks)
@@ -105,6 +121,41 @@ class GPTQ(GPxQ):
                 inp = inp.flatten(1)
                 inp_processed.append(inp)
             inp_processed = torch.stack(inp_processed)
+
+        dev = inp_processed.device
+        n = inp_processed.shape[-1]
+        if self.use_random_proj:
+            # use batching if target_dim is greater than 8000 to avoid memory issues
+            if self.target_dim > 8000:
+                batch_size_proj = 4096
+                accumulated_batches = 0
+                first_batch = True
+                while accumulated_batches < self.target_dim:
+                    # cur_target_dim makes sure to fully use batch_size unless we're too close to target_dim
+                    cur_target_dim = min(batch_size_proj, self.target_dim - accumulated_batches)
+                    accumulated_batches += cur_target_dim
+                    R = torch.normal(
+                        mean=0.0, std=1. / math.sqrt(n), size=(n, cur_target_dim), device=dev)
+                    if first_batch:
+                        inp_processed_proj = inp_processed @ R
+                        first_batch = False
+                    else:
+                        # concatenate projected input along last dimension
+                        inp_processed_proj = torch.cat([inp_processed_proj, (inp_processed @ R)],
+                                                       dim=-1)
+                # finally setting inp_processed to projected one, del proj afterwards
+                inp_processed = inp_processed_proj
+                del inp_processed_proj
+            else:
+                R = torch.normal(mean=0.0, std=1. / math.sqrt(n), size=(n, self.target_dim))
+                # projecting the input data
+                inp_processed = inp_processed @ R.to(inp_processed.device)
+            del R
+        elif self.use_random_sampling:
+            # choose random indices and take TARGET_DIM many
+            ind = torch.randint(n, (self.target_dim,))
+            inp_processed = inp_processed.index_select(-1, ind.to(dev))
+            del ind
 
         # Hessian computation
         self.H *= self.nsamples / (self.nsamples + batch_size)
@@ -414,7 +465,10 @@ class gptq_mode(gpxq_mode):
             act_order: bool = False,
             accumulator_bit_width: Optional[int] = None,
             a2q_layer_filter_fnc: Optional[Callable[[nn.Module], bool]] = lambda x: False,
-            a2q_gptq_class: Optional[A2GPTQ] = A2GPTQ) -> None:
+            a2q_gptq_class: Optional[A2GPTQ] = A2GPTQ,
+            use_random_proj: bool = False,
+            use_random_sampling: bool = False,
+            target_dim: int = 4096) -> None:
         if not inplace:
             model = deepcopy(model)
         super().__init__(
@@ -424,7 +478,10 @@ class gptq_mode(gpxq_mode):
             create_weight_orig,
             use_quant_activations,
             act_order,
-            return_forward_output)
+            return_forward_output,
+            use_random_proj,
+            use_random_sampling,
+            target_dim)
 
         # How many subblock to use during GPTQ for each layer
         self.num_blocks = num_blocks
@@ -473,4 +530,7 @@ class gptq_mode(gpxq_mode):
             act_order=act_order,
             len_parallel_layers=len_parallel_layers,
             create_weight_orig=create_weight_orig,
-            num_blocks=self.num_blocks)
+            num_blocks=self.num_blocks,
+            use_random_proj=self.use_random_proj,
+            use_random_sampling=self.use_random_sampling,
+            target_dim=self.target_dim)

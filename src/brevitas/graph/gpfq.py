@@ -39,16 +39,20 @@ class GPFQ(GPxQ):
             use_random_sampling,
             target_dim) -> None:
 
-        super().__init__(layer, name, act_order, len_parallel_layers, create_weight_orig)
+        super().__init__(
+            layer,
+            name,
+            act_order,
+            len_parallel_layers,
+            create_weight_orig,
+            use_random_proj,
+            use_random_sampling,
+            target_dim)
 
         self.float_input = None
         self.quantized_input = None
         self.index_computed = False
         self.p = p
-        self.save_dir = None
-        self.use_random_proj = use_random_proj
-        self.use_random_sampling = use_random_sampling
-        self.target_dim = target_dim
 
     def collect_float_input(self, module, args, output):
         # this is the hook function to collect the float inputs of this layer
@@ -464,7 +468,10 @@ class gpfq_mode(gpxq_mode):
             create_weight_orig,
             use_quant_activations,
             act_order,
-            return_forward_output)
+            return_forward_output,
+            use_random_proj,
+            use_random_sampling,
+            target_dim)
 
         self.p = p
 
@@ -475,11 +482,6 @@ class gpfq_mode(gpxq_mode):
 
         # speeding up by collecting float input first so we don't need to do it later
         self.collect_float_first = collect_float_first
-
-        # random proj/sample and target_dim
-        self.use_random_proj = use_random_proj
-        self.use_random_sampling = use_random_sampling
-        self.target_dim = target_dim
 
     def __enter__(self):
         # initialize gpxq layers
