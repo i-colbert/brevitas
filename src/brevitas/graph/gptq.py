@@ -54,9 +54,9 @@ class GPTQ(GPxQ):
             len_parallel_layers,
             create_weight_orig,
             num_blocks,
-            use_random_proj,
-            use_random_sampling,
-            target_dim) -> None:
+            use_random_proj=False,
+            use_random_sampling=False,
+            target_dim=10000) -> None:
         super().__init__(
             layer,
             name,
