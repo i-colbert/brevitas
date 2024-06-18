@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from copy import deepcopy
+from tempfile import TemporaryDirectory
 from typing import Callable, List, Optional
 
+from accelerate.utils.offload import offload_state_dict
+from accelerate.utils.offload import OffloadedWeightsLoader
 import numpy as np
 import torch
 import torch.nn as nn
@@ -35,6 +38,7 @@ class GPFQ(GPxQ):
             len_parallel_layers,
             create_weight_orig,
             p,
+            collect_float_first,
             use_random_proj,
             use_random_sampling,
             target_dim) -> None:
@@ -53,6 +57,8 @@ class GPFQ(GPxQ):
         self.quantized_input = None
         self.index_computed = False
         self.p = p
+
+        self.collect_float_first = collect_float_first
 
     def collect_float_input(self, module, args, output):
         # this is the hook function to collect the float inputs of this layer
@@ -117,6 +123,14 @@ class GPFQ(GPxQ):
             self.float_input = inp_processed
         else:
             self.float_input = torch.cat([self.float_input, inp_processed], dim=1)
+
+    def offload_float_input(self, tmp_dir):
+        # create tmp directory for this layer
+        self.save_dir = tmp_dir + '/' + self.name
+        # method expects dict
+        offload_state_dict(self.save_dir, state_dict={'float_input': self.float_input.detach()})
+        # then delete float_input to save memory
+        del self.float_input
 
     def update_batch(self, module, input, current_layer):
         if self.disable_pre_forward_hook:
@@ -205,6 +219,12 @@ class GPFQ(GPxQ):
         weight = self.layer.weight.data
         dev = weight.device
         dtype = weight.dtype
+
+        # load float input from disc if needed
+        if self.collect_float_first:
+            # load float_input from disc
+            self.float_input = OffloadedWeightsLoader(save_folder=self.save_dir)['float_input']
+
         if isinstance(self.layer, SUPPORTED_CONV_OP):
             if isinstance(
                     self.layer,
@@ -280,6 +300,7 @@ class A2GPFQ(GPFQ):
             create_weight_orig,
             accumulator_bit_width,
             p,
+            collect_float_first,
             use_random_proj,
             use_random_sampling,
             target_dim) -> None:
@@ -291,6 +312,7 @@ class A2GPFQ(GPFQ):
             len_parallel_layers=len_parallel_layers,
             create_weight_orig=create_weight_orig,
             p=p,
+            collect_float_first=collect_float_first,
             use_random_proj=use_random_proj,
             use_random_sampling=use_random_sampling,
             target_dim=target_dim)
@@ -328,6 +350,12 @@ class A2GPFQ(GPFQ):
         weight = self.layer.weight.data
         dev = weight.device
         dtype = weight.dtype
+
+        # load float input from disc if needed
+        if self.collect_float_first:
+            # load float_input from disc
+            self.float_input = OffloadedWeightsLoader(save_folder=self.save_dir)['float_input']
+
         if isinstance(self.layer, SUPPORTED_CONV_OP):
             if isinstance(self.layer, (qnn.QuantConvTranspose1d, qnn.QuantConvTranspose2d)):
                 weight = weight.transpose(1, 0)  # This performs a view
@@ -505,12 +533,21 @@ class gpfq_mode(gpxq_mode):
             return self.setup_gpxq_hooks()
 
     def __exit__(self, type, value, traceback):
+        if self.collect_float_first:
+            self.tmp_dir.cleanup()
         self.exit()
 
     def finalize_float_collection(self):
         # remove the hooks we attached during the float collection
         for name, hook in self.float_collection_hooks.items():
             hook.remove()
+
+        # create temp dir
+        self.tmp_dir = TemporaryDirectory()
+
+        # save all float activations to disc and delete them in the layers
+        for name, layer in self.gpxq_layers.items():
+            layer.offload_float_input(tmp_dir=self.tmp_dir.name)
 
         # Re-enable quantization. If activation quantization is disabled,
         # we also disable bias quantization
@@ -571,6 +608,7 @@ class gpfq_mode(gpxq_mode):
                 len_parallel_layers=len_parallel_layers,
                 create_weight_orig=create_weight_orig,
                 p=self.p,
+                collect_float_first=self.collect_float_first,
                 accumulator_bit_width=self.accumulator_bit_width,
                 use_random_proj=self.use_random_proj,
                 use_random_sampling=self.use_random_sampling,
@@ -582,6 +620,7 @@ class gpfq_mode(gpxq_mode):
             len_parallel_layers=len_parallel_layers,
             create_weight_orig=create_weight_orig,
             p=self.p,
+            collect_float_first=self.collect_float_first,
             use_random_proj=self.use_random_proj,
             use_random_sampling=self.use_random_sampling,
             target_dim=self.target_dim)
