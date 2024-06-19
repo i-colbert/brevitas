@@ -9,10 +9,12 @@ from accelerate.utils.offload import offload_state_dict
 from accelerate.utils.offload import OffloadedWeightsLoader
 import numpy as np
 import torch
+from torch.fx import GraphModule as TorchGraphModule
 import torch.nn as nn
 import unfoldNd
 
 from brevitas.function import get_upper_bound_on_l1_norm
+from brevitas.fx import GraphModule
 from brevitas.graph.calibrate import disable_return_quant_tensor
 from brevitas.graph.calibrate import restore_return_quant_tensor
 from brevitas.graph.gpxq import GPxQ
@@ -530,6 +532,11 @@ class gpfq_mode(gpxq_mode):
             return self
         else:
             # if we're not collecting, setup original hooks
+            self.orig_forward = self.model.forward
+            if isinstance(self.model, (GraphModule, TorchGraphModule)):
+                self.model.__class__.forward = self.catch_stopfwd
+            else:
+                self.model.forward = self.catch_stopfwd
             return self.setup_gpxq_hooks()
 
     def __exit__(self, type, value, traceback):
@@ -558,6 +565,12 @@ class gpfq_mode(gpxq_mode):
             self.disable_quant_inference.disable_bias_quantization(self.model, is_training=False)
         restore_return_quant_tensor(self.model, self.return_quant_tensor_state)
 
+        # setup catch_stopfwd
+        self.orig_forward = self.model.forward
+        if isinstance(self.model, (GraphModule, TorchGraphModule)):
+            self.model.__class__.forward = self.catch_stopfwd
+        else:
+            self.model.forward = self.catch_stopfwd
         # setup the original hooks
         self.setup_gpxq_hooks()
 
