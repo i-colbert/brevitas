@@ -17,9 +17,11 @@ from brevitas.inject import this
 from brevitas.inject import value
 from brevitas.proxy.runtime_quant import DynamicActQuantProxyFromInjector
 from brevitas.quant.experimental.float import Fp8e4m3WeightPerChannelFloat
+from brevitas.quant.fixed_point import Int8ActPerTensorFixedPoint
 from brevitas.quant.scaled_int import Int8ActPerTensorFloat
 from brevitas.quant.scaled_int import Int8ActPerTensorFloatMSE
 from brevitas.quant.scaled_int import Int8WeightPerChannelFloat
+from brevitas.quant.shifted_scaled_int import ShiftedUint8ActPerTensorFixedPoint
 from brevitas.quant.shifted_scaled_int import ShiftedUint8ActPerTensorFloat
 from brevitas.quant.shifted_scaled_int import ShiftedUint8ActPerTensorFloatMSE
 
@@ -167,3 +169,27 @@ class ShiftedUint8DynamicActPerRowFloat(DynamicActProxyMixin, ShiftedUint8ActPer
     scaling_per_output_channel = True
     zero_point_impl = RuntimeDynamicStatsZeroPoint
     zero_point_stats_impl = NegativeMinOrZero
+
+
+# po2 quantizers for lpa stuff
+class Int8DynamicActPerTensorFixedPoint(DynamicActProxyMixin, Int8ActPerTensorFixedPoint):
+    """
+    Symmetric quantizer with per tensor dynamic scale.
+    """
+    scaling_impl = RuntimeDynamicStatsScaling
+    scaling_stats_input_view_shape_impl = OverTensorView
+    scaling_stats_op = 'min_max'
+    dynamic_scaling_broadcastable_fn = lambda x, shape: x.view(SCALAR_SHAPE)
+
+
+class ShiftedUint8DynamicActPerTensorFixedPoint(DynamicActProxyMixin,
+                                                ShiftedUint8ActPerTensorFixedPoint):
+    """
+    Symmetric quantizer with per tensor dynamic scale.
+    """
+    scaling_impl = RuntimeDynamicStatsScaling
+    scaling_stats_input_view_shape_impl = OverTensorView
+    scaling_stats_op = 'min_max'
+    zero_point_impl = RuntimeDynamicStatsZeroPoint
+    zero_point_stats_impl = NegativeMinOrZero
+    dynamic_scaling_broadcastable_fn = lambda x, shape: x.view(SCALAR_SHAPE)
