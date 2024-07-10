@@ -7,10 +7,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import field
 from functools import partial
+import math
 from operator import attrgetter
 from typing import List, Optional, Set
 import warnings
 
+import torch
 from torch.fx import GraphModule as TorchGraphModule
 
 from brevitas.fx import GraphModule
@@ -74,7 +76,10 @@ class gpxq_mode(ABC):
             create_weight_orig: bool = True,
             use_quant_activations: bool = True,
             act_order: bool = False,
-            return_forward_output: bool = False) -> None:
+            return_forward_output: bool = False,
+            use_random_proj: bool = False,
+            use_random_sampling: bool = False,
+            target_dim: int = 4096) -> None:
 
         if not inplace:
             model = deepcopy(model)
@@ -97,11 +102,10 @@ class gpxq_mode(ABC):
         self.group_of_parallel_layers = group_of_parallel_layers
         self.return_forward_output = return_forward_output
 
-        self.orig_forward = self.model.forward
-        if isinstance(self.model, (GraphModule, TorchGraphModule)):
-            self.model.__class__.forward = self.catch_stopfwd
-        else:
-            self.model.forward = self.catch_stopfwd
+        # random proj/sample and target_dim
+        self.use_random_proj = use_random_proj
+        self.use_random_sampling = use_random_sampling
+        self.target_dim = target_dim
 
     def _is_module_supported(self, module):
         if isinstance(module, SUPPORTED_CONV_OP):
@@ -199,7 +203,15 @@ class gpxq_mode(ABC):
 class GPxQ(ABC):
 
     def __init__(
-            self, layer, name, act_order, len_parallel_layers=1, create_weight_orig=True) -> None:
+            self,
+            layer,
+            name,
+            act_order,
+            len_parallel_layers=1,
+            create_weight_orig=True,
+            use_random_proj=False,
+            use_random_sampling=False,
+            target_dim=4096) -> None:
         self.layer = layer
         self.name = name
         self.act_order = act_order
@@ -228,6 +240,10 @@ class GPxQ(ABC):
         self.disable_pre_forward_hook = False
         # Some layers require knowledge from quant inputs to compute quant weights
         self.quant_input = None
+
+        self.use_random_proj = use_random_proj
+        self.use_random_sampling = use_random_sampling
+        self.target_dim = target_dim
 
     def process_input(self, inp):
         # Input is a tuple, so we take first element
@@ -304,3 +320,46 @@ class GPxQ(ABC):
         # We need to remove the last dim
         q = q.squeeze(2)  # [groups, OC/groups] or [1, OC]
         return q
+
+
+def random_projection(
+        float_input: torch.Tensor,
+        quantized_input: torch.Tensor,
+        target_dim: int,
+        batch_size: int = 2048):
+    # use random projection to reduce dimensionality
+    n = quantized_input.size(1)
+    dev = float_input.device
+    # use batching if target_dim is greater than 8000 to avoid memory issues
+    if target_dim > 8000:
+        accumulated_batches = 0
+        first_batch = True
+        quantized_input = torch.transpose(quantized_input, 1, 2)
+        float_input = torch.transpose(float_input, 1, 2)
+        while accumulated_batches < target_dim:
+            # cur_target_dim makes sure to fully use batch_size unless we're too close to target_dim
+            cur_target_dim = min(batch_size, target_dim - accumulated_batches)
+            accumulated_batches += cur_target_dim
+            R = torch.normal(mean=0.0, std=1. / math.sqrt(n), size=(cur_target_dim, n), device=dev)
+            if first_batch:
+                quantized_input_proj = (quantized_input @ R.T).cpu()
+                float_input_proj = (float_input @ R.T).cpu()
+                first_batch = False
+            else:
+                # concatenate projected input along last dimension
+                quantized_input_proj = torch.cat(
+                    [quantized_input_proj, (quantized_input @ R.T).cpu()], dim=-1)
+                float_input_proj = torch.cat([float_input_proj, (float_input @ R.T).cpu()], dim=-1)
+    else:
+        # create gaussian random matrix
+        R = torch.normal(mean=0.0, std=1. / math.sqrt(n), size=(target_dim, n), device=dev)
+        quantized_input_proj = torch.transpose(quantized_input, 1, 2) @ R.T
+        float_input_proj = torch.transpose(float_input, 1, 2) @ R.T
+        del R
+    # reshape back
+    quantized_input_proj = torch.transpose(quantized_input_proj, 1, 2)
+    float_input_proj = torch.transpose(float_input_proj, 1, 2)
+    del quantized_input
+    del float_input
+
+    return float_input_proj, quantized_input_proj

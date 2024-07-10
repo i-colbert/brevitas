@@ -25,6 +25,7 @@ from brevitas.quant.scaled_int import Int8WeightPerChannelFloat
 from brevitas.quant.scaled_int import Int8WeightPerChannelFloatMSE
 from brevitas.quant.scaled_int import Int8WeightPerTensorFloat
 from brevitas.quant.scaled_int import Int8WeightPerTensorFloatMSE
+from brevitas.quant.shifted_scaled_int import ShiftedUint8ActPerTensorFixedPoint
 from brevitas.quant.shifted_scaled_int import ShiftedUint8ActPerTensorFloat
 from brevitas.quant.shifted_scaled_int import ShiftedUint8ActPerTensorFloatMSE
 from brevitas.quant.shifted_scaled_int import ShiftedUint8WeightPerChannelFloat
@@ -36,9 +37,11 @@ from brevitas_examples.common.generative.nn import LoRACompatibleQuantLinear
 from brevitas_examples.common.generative.quantizers import Fp8e4m3WeightSymmetricGroupQuant
 from brevitas_examples.common.generative.quantizers import Int8DynamicActPerGroupFloat
 from brevitas_examples.common.generative.quantizers import Int8DynamicActPerRowFloat
+from brevitas_examples.common.generative.quantizers import Int8DynamicActPerTensorFixedPoint
 from brevitas_examples.common.generative.quantizers import Int8DynamicActPerTensorFloat
 from brevitas_examples.common.generative.quantizers import IntWeightSymmetricGroupQuant
 from brevitas_examples.common.generative.quantizers import ShiftedUint8DynamicActPerRowFloat
+from brevitas_examples.common.generative.quantizers import ShiftedUint8DynamicActPerTensorFixedPoint
 from brevitas_examples.common.generative.quantizers import ShiftedUint8DynamicActPerTensorFloat
 from brevitas_examples.common.generative.quantizers import ShiftedUintWeightAsymmetricGroupQuant
 
@@ -95,7 +98,8 @@ INPUT_QUANT_MAP = {
             'po2_scale': {
                 'stats': {
                     'per_tensor': {
-                        'sym': Int8ActPerTensorFixedPoint},},
+                        'sym': Int8ActPerTensorFixedPoint,
+                        'asym': ShiftedUint8ActPerTensorFixedPoint}},
                 'mse': {
                     'per_tensor': {
                         'sym': Int8ActPerTensorFixedPointMSE},},}},
@@ -109,7 +113,12 @@ INPUT_QUANT_MAP = {
                         'sym': Int8DynamicActPerRowFloat,
                         'asym': ShiftedUint8DynamicActPerRowFloat},
                     'per_group': {
-                        'sym': Int8DynamicActPerGroupFloat},}}}},
+                        'sym': Int8DynamicActPerGroupFloat},}},
+            'po2_scale': {
+                'stats': {
+                    'per_tensor': {
+                        'sym': Int8DynamicActPerTensorFixedPoint,
+                        'asym': ShiftedUint8DynamicActPerTensorFixedPoint},}}}},
     'float': {
         'static': {
             'float_scale': {

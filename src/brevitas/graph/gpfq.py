@@ -2,18 +2,24 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from copy import deepcopy
+from tempfile import TemporaryDirectory
 from typing import Callable, List, Optional
 
+from accelerate.utils.offload import offload_state_dict
+from accelerate.utils.offload import OffloadedWeightsLoader
 import numpy as np
 import torch
+from torch.fx import GraphModule as TorchGraphModule
 import torch.nn as nn
 import unfoldNd
 
 from brevitas.function import get_upper_bound_on_l1_norm
+from brevitas.fx import GraphModule
 from brevitas.graph.calibrate import disable_return_quant_tensor
 from brevitas.graph.calibrate import restore_return_quant_tensor
 from brevitas.graph.gpxq import GPxQ
 from brevitas.graph.gpxq import gpxq_mode
+from brevitas.graph.gpxq import random_projection
 from brevitas.graph.gpxq import StopFwdException
 from brevitas.graph.gpxq import SUPPORTED_CONV_OP
 import brevitas.nn as qnn
@@ -26,15 +32,35 @@ class GPFQ(GPxQ):
     Based on https://github.com/YixuanSeanZhou/Quantized_Neural_Nets/tree/main
     """
 
-    def __init__(self, layer, name, act_order, len_parallel_layers, create_weight_orig, p) -> None:
+    def __init__(
+            self,
+            layer,
+            name,
+            act_order,
+            len_parallel_layers,
+            create_weight_orig,
+            p,
+            collect_float_first,
+            use_random_proj,
+            use_random_sampling,
+            target_dim) -> None:
 
-        super().__init__(layer, name, act_order, len_parallel_layers, create_weight_orig)
+        super().__init__(
+            layer,
+            name,
+            act_order,
+            len_parallel_layers,
+            create_weight_orig,
+            use_random_proj,
+            use_random_sampling,
+            target_dim)
 
         self.float_input = None
         self.quantized_input = None
         self.index_computed = False
         self.p = p
-        self.save_dir = None
+
+        self.collect_float_first = collect_float_first
 
     def collect_float_input(self, module, args, output):
         # this is the hook function to collect the float inputs of this layer
@@ -99,6 +125,14 @@ class GPFQ(GPxQ):
             self.float_input = inp_processed
         else:
             self.float_input = torch.cat([self.float_input, inp_processed], dim=1)
+
+    def offload_float_input(self, tmp_dir):
+        # create tmp directory for this layer
+        self.save_dir = tmp_dir + '/' + self.name
+        # method expects dict
+        offload_state_dict(self.save_dir, state_dict={'float_input': self.float_input.detach()})
+        # then delete float_input to save memory
+        del self.float_input
 
     def update_batch(self, module, input, current_layer):
         if self.disable_pre_forward_hook:
@@ -187,6 +221,12 @@ class GPFQ(GPxQ):
         weight = self.layer.weight.data
         dev = weight.device
         dtype = weight.dtype
+
+        # load float input from disc if needed
+        if self.collect_float_first:
+            # load float_input from disc
+            self.float_input = OffloadedWeightsLoader(save_folder=self.save_dir)['float_input']
+
         if isinstance(self.layer, SUPPORTED_CONV_OP):
             if isinstance(
                     self.layer,
@@ -194,24 +234,33 @@ class GPFQ(GPxQ):
                 weight = weight.transpose(1, 0)  # This performs a view
             weight = weight.flatten(1)
         weight = weight.view(self.groups, -1, weight.shape[-1])  # [Groups, OC/Groups, IC]
-        U = torch.zeros(
-            weight.shape[0], weight.shape[1], self.float_input.shape[1], device=dev, dtype=dtype)
+
+        if self.use_random_proj:
+            self.float_input, self.quantized_input = random_projection(self.float_input, self.quantized_input, self.target_dim)
+        elif self.use_random_sampling:
+            # choose random indices and take TARGET_DIM many
+            ind = torch.randint(self.float_input.shape[1], (self.target_dim,))
+            self.float_input = self.float_input.index_select(1, ind.to(dev))
+            self.quantized_input = self.quantized_input.index_select(1, ind.to(dev))
+
         self.float_input = self.float_input.to(dev)
         self.quantized_input = self.quantized_input.to(dev)
+
+        U = torch.zeros(
+            weight.shape[0], weight.shape[1], self.float_input.shape[1], device=dev, dtype=dtype)
         # We don't need full Hessian, we just need the diagonal
-        H_diag = self.quantized_input.transpose(2,
-                                                1).square().sum(2)  # summing over Batch dimension
+        self.H_diag = self.quantized_input.transpose(2, 1).square().sum(
+            2)  # summing over Batch dimension
         permutation_list = []
         for group_index in range(self.groups):
             if self.act_order:
                 # Re-order Hessian_diagonal so that weights associated to
                 # higher magnitude activations are quantized first
-                perm = torch.argsort(H_diag[group_index, :], descending=True)
+                perm = torch.argsort(self.H_diag[group_index, :], descending=True)
             else:
                 # No permutation, permutation tensor is a ordered index
                 perm = torch.tensor(range(weight.shape[-1]), device=dev)
             permutation_list.append(perm)
-        del H_diag  # free memory
         for t in range(weight.shape[-1]):
             for group_index in range(self.groups):
                 U[group_index] += torch.matmul(
@@ -252,7 +301,11 @@ class A2GPFQ(GPFQ):
             len_parallel_layers,
             create_weight_orig,
             accumulator_bit_width,
-            p) -> None:
+            p,
+            collect_float_first,
+            use_random_proj,
+            use_random_sampling,
+            target_dim) -> None:
         GPFQ.__init__(
             self,
             layer=layer,
@@ -260,7 +313,11 @@ class A2GPFQ(GPFQ):
             act_order=act_order,
             len_parallel_layers=len_parallel_layers,
             create_weight_orig=create_weight_orig,
-            p=p)
+            p=p,
+            collect_float_first=collect_float_first,
+            use_random_proj=use_random_proj,
+            use_random_sampling=use_random_sampling,
+            target_dim=target_dim)
         self.accumulator_bit_width = accumulator_bit_width
         assert self.accumulator_bit_width is not None
 
@@ -295,11 +352,25 @@ class A2GPFQ(GPFQ):
         weight = self.layer.weight.data
         dev = weight.device
         dtype = weight.dtype
+
+        # load float input from disc if needed
+        if self.collect_float_first:
+            # load float_input from disc
+            self.float_input = OffloadedWeightsLoader(save_folder=self.save_dir)['float_input']
+
         if isinstance(self.layer, SUPPORTED_CONV_OP):
             if isinstance(self.layer, (qnn.QuantConvTranspose1d, qnn.QuantConvTranspose2d)):
                 weight = weight.transpose(1, 0)  # This performs a view
             weight = weight.flatten(1)
         weight = weight.view(self.groups, -1, weight.shape[-1])  # [Groups, OC/Groups, IC]
+
+        if self.use_random_proj:
+            self.float_input, self.quantized_input = random_projection(self.float_input, self.quantized_input, self.target_dim)
+        elif self.use_random_sampling:
+            # choose random indices and take TARGET_DIM many
+            ind = torch.randint(self.float_input.shape[1], (self.target_dim,))
+            self.float_input = self.float_input.index_select(1, ind.to(dev))
+            self.quantized_input = self.quantized_input.index_select(1, ind.to(dev))
 
         self.float_input = self.float_input.to(dev)
         self.quantized_input = self.quantized_input.to(dev)
@@ -414,7 +485,10 @@ class gpfq_mode(gpxq_mode):
             accumulator_bit_width: Optional[int] = None,
             a2q_layer_filter_fnc: Optional[Callable[[nn.Module], bool]] = lambda x: False,
             a2q_gpfq_class: Optional[A2GPFQ] = A2GPFQ,
-            collect_float_first: bool = False) -> None:
+            collect_float_first: bool = False,
+            use_random_proj: bool = False,
+            use_random_sampling: bool = False,
+            target_dim: int = 2048) -> None:
         if not inplace:
             model = deepcopy(model)
         super().__init__(
@@ -424,7 +498,10 @@ class gpfq_mode(gpxq_mode):
             create_weight_orig,
             use_quant_activations,
             act_order,
-            return_forward_output)
+            return_forward_output,
+            use_random_proj,
+            use_random_sampling,
+            target_dim)
 
         self.p = p
 
@@ -455,15 +532,29 @@ class gpfq_mode(gpxq_mode):
             return self
         else:
             # if we're not collecting, setup original hooks
+            self.orig_forward = self.model.forward
+            if isinstance(self.model, (GraphModule, TorchGraphModule)):
+                self.model.__class__.forward = self.catch_stopfwd
+            else:
+                self.model.forward = self.catch_stopfwd
             return self.setup_gpxq_hooks()
 
     def __exit__(self, type, value, traceback):
+        if self.collect_float_first:
+            self.tmp_dir.cleanup()
         self.exit()
 
     def finalize_float_collection(self):
         # remove the hooks we attached during the float collection
         for name, hook in self.float_collection_hooks.items():
             hook.remove()
+
+        # create temp dir
+        self.tmp_dir = TemporaryDirectory()
+
+        # save all float activations to disc and delete them in the layers
+        for name, layer in self.gpxq_layers.items():
+            layer.offload_float_input(tmp_dir=self.tmp_dir.name)
 
         # Re-enable quantization. If activation quantization is disabled,
         # we also disable bias quantization
@@ -474,6 +565,12 @@ class gpfq_mode(gpxq_mode):
             self.disable_quant_inference.disable_bias_quantization(self.model, is_training=False)
         restore_return_quant_tensor(self.model, self.return_quant_tensor_state)
 
+        # setup catch_stopfwd
+        self.orig_forward = self.model.forward
+        if isinstance(self.model, (GraphModule, TorchGraphModule)):
+            self.model.__class__.forward = self.catch_stopfwd
+        else:
+            self.model.forward = self.catch_stopfwd
         # setup the original hooks
         self.setup_gpxq_hooks()
 
@@ -524,11 +621,19 @@ class gpfq_mode(gpxq_mode):
                 len_parallel_layers=len_parallel_layers,
                 create_weight_orig=create_weight_orig,
                 p=self.p,
-                accumulator_bit_width=self.accumulator_bit_width)
+                collect_float_first=self.collect_float_first,
+                accumulator_bit_width=self.accumulator_bit_width,
+                use_random_proj=self.use_random_proj,
+                use_random_sampling=self.use_random_sampling,
+                target_dim=self.target_dim)
         return GPFQ(
             layer=layer,
             name=name,
             act_order=act_order,
             len_parallel_layers=len_parallel_layers,
             create_weight_orig=create_weight_orig,
-            p=self.p)
+            p=self.p,
+            collect_float_first=self.collect_float_first,
+            use_random_proj=self.use_random_proj,
+            use_random_sampling=self.use_random_sampling,
+            target_dim=self.target_dim)
