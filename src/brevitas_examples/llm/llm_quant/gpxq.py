@@ -12,7 +12,7 @@ from brevitas.graph.calibrate import disable_return_quant_tensor
 from brevitas.graph.calibrate import DisableEnableQuantization
 from brevitas.graph.calibrate import restore_return_quant_tensor
 from brevitas.graph.gpfq import gpfq_mode
-from brevitas.graph.gpfq import GPFQv2
+from brevitas.graph.gpfq import GPFQ
 from brevitas.graph.gptq import GPTQ
 from brevitas.graph.gptq import gptq_mode
 from brevitas.utils.python_utils import recurse_getattr
@@ -114,10 +114,10 @@ def apply_gptq(
         group_of_parallel_layers=None,
         block_name=None,
         max_accumulator_bit_width=None,
-        max_accumulator_tile_size=128):
+        max_accumulator_tile_size=None):
     if max_accumulator_bit_width is not None:
         # Use accumulator-aware extension (AXE) framework
-        print(f"Using AXE to target {max_accumulator_bit_width}-bit accumulation...")
+        print(f"Using AXE to target {max_accumulator_tile_size}x{max_accumulator_bit_width}b...")
         gptq_class = partial(
             A2GPTQ,
             max_accumulator_bit_width=max_accumulator_bit_width,
@@ -154,16 +154,16 @@ def apply_gpfq(
         group_of_parallel_layers=None,
         block_name=None,
         max_accumulator_bit_width=None,
-        max_accumulator_tile_size=128):
+        max_accumulator_tile_size=None):
     if max_accumulator_bit_width is not None:
         # Use accumulator-aware extension (AXE) framework
-        print(f"Using AXE to target {max_accumulator_bit_width}-bit accumulation...")
+        print(f"Using AXE to target {max_accumulator_tile_size}x{max_accumulator_bit_width}b...")
         gpfq_class = partial(
             A2GPFQ,
             max_accumulator_bit_width=max_accumulator_bit_width,
             max_accumulator_tile_size=max_accumulator_tile_size)
     else:
-        gpfq_class = GPFQv2
+        gpfq_class = GPFQ
     if block_name is not None:
         context_manager_kwargs = {
             'act_order': act_order,
