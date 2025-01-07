@@ -194,7 +194,8 @@ class A2GPTQ(_AXE, GPTQ):
             "Error: accumulator bit width needs to be bigger than 1."
 
     def single_layer_update(self, percdamp=0.01, c=1e2):
-        assert not self.layer.weight_quant.requires_quant_input, "Error: GPTQ does not support weight quantizers that require quantized inputs."
+        assert not self.layer.weight_quant.requires_quant_input, \
+            "Error: GPTQ does not support weight quantizers that require quantized inputs."
         if self.quant_metadata is None:
             raise ValueError(
                 "Expected self.quant_metadata to calculate accumualtor bounds, but recevied None. "
