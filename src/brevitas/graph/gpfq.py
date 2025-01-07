@@ -44,7 +44,7 @@ class GPFQ(GPxQ):
                                      dtype=torch.float32,
                                      pin_memory=torch.cuda.is_available())
         self.nsamples = 0
-        self.float_input = None
+
         self.quant_input = None
 
         self.create_weight_orig = create_weight_orig  # not saved by base class
