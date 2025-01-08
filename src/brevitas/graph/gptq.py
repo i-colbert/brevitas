@@ -122,7 +122,8 @@ class GPTQ(GPxQ):
             raise StopFwdException
 
     def single_layer_update(self, percdamp=.01, c=1e2):
-        assert not self.layer.weight_quant.requires_quant_input, "Error: GPTQ does not support weight quantizers that require quantized inputs."
+        assert not self.layer.weight_quant.requires_quant_input, \
+            "Error: GPTQ does not support weight quantizers that require quantized inputs."
         if hasattr(self.layer, 'allocate_params'):
             self.layer.allocate_params(self.layer)
         weight = self.layer.weight.data
@@ -175,7 +176,7 @@ class GPTQ(GPxQ):
                 self.H[i, :, :] = torch.linalg.cholesky(self.H[i, :, :])
                 self.H[i, :, :] = torch.cholesky_inverse(self.H[i, :, :])
                 # stabilizing the Cholesky decomposition with a fairly large constant, c
-                self.H[i, :, :] = torch.linalg.cholesky(self.H[i, :, :] * (c ** 2), upper=True) / c
+                self.H[i, :, :] = torch.linalg.cholesky(self.H[i, :, :] * c, upper=True) / math.sqrt(c)
             h_inv = self.H
         except LinAlgError as e:
             warnings.warn(
