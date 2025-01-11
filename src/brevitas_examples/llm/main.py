@@ -8,6 +8,7 @@ from datetime import timedelta
 import functools
 import pprint
 import sys
+import pprint
 from warnings import warn
 
 import numpy as np
@@ -18,6 +19,7 @@ from transformers import AutoTokenizer
 from transformers.utils.fx import _SUPPORTED_MODELS
 import yaml
 
+from brevitas.core.function_wrapper import RoundToZeroSte
 from brevitas.export import export_torch_qcdq
 from brevitas.export.inference.manager import quant_inference_mode
 from brevitas.export.onnx.standard.qcdq.manager import StdQCDQONNXManager
@@ -42,6 +44,7 @@ from brevitas_examples.llm.llm_quant.data_utils import get_dataset_for_model
 from brevitas_examples.llm.llm_quant.equalize import apply_act_equalization
 from brevitas_examples.llm.llm_quant.equalize import apply_weight_equalization
 from brevitas_examples.llm.llm_quant.eval import compute_perplexity
+from brevitas_examples.llm.llm_quant.ep_init import apply_ep_init
 from brevitas_examples.llm.llm_quant.export import BlockQuantProxyLevelManager
 from brevitas_examples.llm.llm_quant.export import brevitas_proxy_export_mode
 from brevitas_examples.llm.llm_quant.gpxq import apply_gpfq
@@ -382,6 +385,9 @@ def quantize_llm(args):
             scale_rounding_func_type=args.scale_rounding_func_type,
             device=device,
             scaling_min_val=args.scaling_min_val)
+        # NOTE: EP-init requires round-to-zero
+        if args.ep_init:
+            weight_quant = weight_quant.let(float_to_int_impl=RoundToZeroSte)
         layer_map = generate_quant_maps(
             linear_input_quant=linear_input_quant,
             weight_quant=weight_quant,
@@ -497,6 +503,8 @@ def quantize_llm(args):
 
         if args.gptq and not args.load_checkpoint:
             print("Applying GPTQ...")
+            # Disable AXE if EP-init is enabled
+            max_accumulator_bit_width = None if args.ep_init else args.gpxq_max_accumulator_bit_width
             apply_gptq(
                 model,
                 calibration_loader,
@@ -504,20 +512,30 @@ def quantize_llm(args):
                 use_quant_activations=args.gpxq_use_quant_activations,
                 create_weight_orig=args.gpxq_create_weight_orig,
                 block_name=args.gpxq_block_name,
-                max_accumulator_bit_width=args.gpxq_max_accumulator_bit_width,
+                max_accumulator_bit_width=max_accumulator_bit_width,
                 max_accumulator_tile_size=args.gpxq_max_accumulator_tile_size)
             print("GPTQ applied.")
 
         if args.gpfq and not args.load_checkpoint:
             print("Applying GPFQ...")
+            # Disable AXE if EP-init is enabled
+            max_accumulator_bit_width = None if args.ep_init else args.gpxq_max_accumulator_bit_width
             apply_gpfq(
                 model,
                 calibration_loader,
                 act_order=args.gpxq_act_order,
                 block_name=args.gpxq_block_name,
-                max_accumulator_bit_width=args.gpxq_max_accumulator_bit_width,
+                max_accumulator_bit_width=max_accumulator_bit_width,
                 max_accumulator_tile_size=args.gpxq_max_accumulator_tile_size)
             print("GPFQ applied.")
+
+        if args.ep_init:
+            print("Applying EP-init...")
+            apply_ep_init(
+                model,
+                dataloader=calibration_loader,
+                max_accumulator_bit_width=args.gpxq_max_accumulator_bit_width)
+            print("EP-init applied.")
 
         if args.bias_corr and not args.load_checkpoint:
             print("Applying bias correction...")
@@ -615,7 +633,12 @@ def quantize_llm(args):
             model = model.to(dtype=torch.float32)
             model_export(model, calibration_loader[0], args)
 
-    return float_ppl, quant_ppl, model
+    metrics = {
+        "float_ppl": float_ppl,
+        "quant_ppl": quant_ppl}
+    tags=vars(args)
+
+    return model, metrics, tags
 
 
 def override_defaults(args):
@@ -803,6 +826,7 @@ def parse_args(args, override_defaults={}):
         '--quantize-last-layer', action='store_true', help='Quantize last nn.Linear layer.')
     parser.add_argument('--gptq', action='store_true', help='Apply GPTQ.')
     parser.add_argument('--gpfq', action='store_true', help='Apply GPFQ.')
+    parser.add_argument('--ep-init', action='store_true', help='Apply EP-init.')
     parser.add_argument(
         '--gpxq-act-order', action='store_true', help='Apply GPxQ activation ordering.')
     parser.add_argument(
