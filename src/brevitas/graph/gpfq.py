@@ -239,6 +239,9 @@ class GPFQ(GPxQ):
                 assert not torch.isnan(q_arg).any()
                 weight[group_index, :, i] = q_arg.to(dtype)
 
+        if hasattr(self.layer, 'offload_params'):
+            self.layer.offload_params(self.layer)
+
 
 class gpfq_mode(gpxq_mode):
     """
