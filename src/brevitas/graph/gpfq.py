@@ -4,13 +4,12 @@
 from copy import deepcopy
 import math
 from typing import List, Optional
+import warnings
 
 import torch
 from torch import Tensor
 import torch.nn as nn
-
 import unfoldNd
-import warnings
 
 from brevitas.graph.calibrate import disable_return_quant_tensor
 from brevitas.graph.calibrate import restore_return_quant_tensor
@@ -23,11 +22,9 @@ from brevitas.utils.torch_utils import StopFwdException
 
 
 class GPFQ(GPxQ):
-
     "Optimized greedy path following quantization (GPFQ)"
 
-    def __init__(
-            self, layer, name, act_order, len_parallel_layers, create_weight_orig) -> None:
+    def __init__(self, layer, name, act_order, len_parallel_layers, create_weight_orig) -> None:
         super().__init__(layer, name, act_order, len_parallel_layers, create_weight_orig)
         # Initialize covariance matrices. We need them in float32
         # H = \hat{X} \hat{X}^T
@@ -172,7 +169,8 @@ class GPFQ(GPxQ):
             weight = weight.flatten(1)
             weight_orig = weight_orig.flatten(1)
         weight = weight.view(self.groups, -1, weight.shape[-1])  # [Groups, OC/Groups, IC]
-        weight_orig = weight_orig.view(self.groups, -1, weight_orig.shape[-1])  # [Groups, OC/Groups, IC]
+        weight_orig = weight_orig.view(
+            self.groups, -1, weight_orig.shape[-1])  # [Groups, OC/Groups, IC]
 
         # Get the diagonals of the covariance matrices here
         permutation_list = []
@@ -196,28 +194,22 @@ class GPFQ(GPxQ):
             perm = perm.to(weight.device)
             permutation_list.append(perm)
 
-        Dg: Tensor = torch.zeros(
-            (self.groups, self.columns),
-            dtype=torch.float32)
-        Dh: Tensor = torch.zeros(
-            (self.groups, self.columns),
-            dtype=torch.float32)
+        Dg: Tensor = torch.zeros((self.groups, self.columns), dtype=torch.float32)
+        Dh: Tensor = torch.zeros((self.groups, self.columns), dtype=torch.float32)
         for group_index in range(self.groups):
             Dg[group_index].copy_(self.G[group_index].diag())
             Dh[group_index].copy_(self.H[group_index].diag())
         # if either norms are 0, the weight is effectively pruned
         Ds = torch.where(Dg * Dh != 0, Dg / Dh, 0)  # \hat{D}_tt / D_tt
 
-        Lg: Tensor = torch.zeros(
-            (self.groups, self.columns, self.columns),
-            device=dev,
-            dtype=torch.float32)
-        Lh: Tensor = torch.zeros(
-            (self.groups, self.columns, self.columns),
-            device=dev,
-            dtype=torch.float32)
+        Lg: Tensor = torch.zeros((self.groups, self.columns, self.columns),
+                                 device=dev,
+                                 dtype=torch.float32)
+        Lh: Tensor = torch.zeros((self.groups, self.columns, self.columns),
+                                 device=dev,
+                                 dtype=torch.float32)
         for group_index in range(self.groups):
-            L0g = torch.tril(self.G[group_index], -1) # L0
+            L0g = torch.tril(self.G[group_index], -1)  # L0
             L0h = torch.tril(self.H[group_index], -1)  # \hat{L0}
             Dhi = torch.where(Dh[group_index] != 0, 1. / Dh[group_index], 0)  # D^{-1}
             Lg[group_index].copy_(torch.diag(Dhi) @ L0g)
@@ -231,8 +223,10 @@ class GPFQ(GPxQ):
                 # i := input channel index (weight and error are not re-ordered)
                 i = permutation_list[group_index][t]
 
-                w: Tensor = weight_orig[group_index, :, permutation_list[group_index][:t]].to(torch.float32)
-                q: Tensor = self.get_quant_weights(group_index, t, permutation_list).to(torch.float32)
+                w: Tensor = weight_orig[group_index, :,
+                                        permutation_list[group_index][:t]].to(torch.float32)
+                q: Tensor = self.get_quant_weights(group_index, t,
+                                                   permutation_list).to(torch.float32)
                 Lw = w.matmul(Lg[group_index, t, :t])
                 Lq = q.matmul(Lh[group_index, t, :t])
                 q_arg = Ds[group_index, t] * weight[group_index, :, i].to(torch.float32) + Lw - Lq
@@ -253,15 +247,15 @@ class gpfq_mode(gpxq_mode):
             a group of layer names that can be optimized in parallel. Default: None
         inplace (bool): Wheter to apply GPFQ inplace or perform a deepcopy. Default: True
         create_weight_orig (bool): If True, store the original floating point weights before
-            applying gpfq. These weights will be used anytime quantization is disabled. 
+            applying gpfq. These weights will be used anytime quantization is disabled.
             Default: True
-        use_quant_activations (bool): Wheter to leave quantize activations enabled while 
+        use_quant_activations (bool): Wheter to leave quantize activations enabled while
             performing GPFQ. Default: False
         return_forward_output (bool): If True, returns the output of the forward pass. Otherwise
             the forward call inside the context manager returns None. Default: False
-        act_order (bool): Whether to order greedy path following by Hessian approximation. 
+        act_order (bool): Whether to order greedy path following by Hessian approximation.
             Default: False
-        gpfq_class (GPFQ): The uninitialized class to perform GPFQ. 
+        gpfq_class (GPFQ): The uninitialized class to perform GPFQ.
             Default: `brevitas.graph.gpfq.GPFQv2`, which is the memory-efficient formulation
 
     Example:

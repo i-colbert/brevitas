@@ -14,13 +14,14 @@ try:
 except:
     LinAlgError = RuntimeError
 
-from brevitas.function.ops import max_int, min_int
-from brevitas.utils.quant_utils import _CachedIO
+from brevitas.function.ops import max_int
+from brevitas.function.ops import min_int
 from brevitas.graph.gpfq import GPFQ
 from brevitas.graph.gptq import GPTQ
 from brevitas.graph.gpxq import GPxQ
 from brevitas.graph.gpxq import SUPPORTED_CONV_OP
 from brevitas.graph.gpxq import SUPPORTED_TCONV_OP
+from brevitas.utils.quant_utils import _CachedIO
 
 
 def _get_average_of_nonzero_magnitudes(vec: np.ndarray, radius: float = 1.0):
@@ -62,7 +63,7 @@ def pad_tensor_with_zeros(tensor: Tensor, tile_size: int) -> Tensor:
 class _AXE:
 
     # Mixin for accumulator-aware methods
-    
+
     quant_metadata: _CachedIO = None
     max_accumulator_bit_width: Tensor = None
     max_accumulator_tile_size: int = None
@@ -130,7 +131,8 @@ class _AXE:
     def get_scales_and_thresholds(self, weight: Tensor):
         # NOTE: assuming sign-magnitude here, which is sufficient to support both
         # sign-magnitude and 2s complement accumulators
-        Z = (torch.exp2(self.max_accumulator_bit_width) - 2) / float(self.input_max - self.input_min)
+        Z = (torch.exp2(self.max_accumulator_bit_width) -
+             2) / float(self.input_max - self.input_min)
         n_tiles = math.ceil(weight.shape[-1] / self.max_accumulator_tile_size)
 
         scales: Tensor = self.layer.weight_quant.scale()
@@ -295,7 +297,8 @@ class A2GPTQ(_AXE, GPTQ):
                     s = scales[group_index, bx].to(dtype)
                     n = neg_limits[group_index, bx]
                     p = pos_limits[group_index, bx]
-                    q_arg: Tensor = weight[group_index, :, perm[i1:i2][i]].to(torch.float32)  # [OC/groups]
+                    q_arg: Tensor = weight[group_index, :,
+                                           perm[i1:i2][i]].to(torch.float32)  # [OC/groups]
                     u = self.upper_lim(n, p)
                     l = self.lower_lim(n, p)
                     assert (u - l + 1 >= 0).all()
@@ -328,8 +331,11 @@ class A2GPTQ(_AXE, GPTQ):
                     neg_limits[group_index, bx, q <= 0] += q[q <= 0].to(lim_dtype)
                     assert (pos_limits >= 0).all()
                     assert (neg_limits <= 0).all()
-                    assert (((self.input_max * pos_limits) + (self.input_min * neg_limits)) <= max_limits).all()
-                    assert (-((self.input_min * pos_limits) + (self.input_max * neg_limits)) <= max_limits).all()
+                    assert (((self.input_max * pos_limits) +
+                             (self.input_min * neg_limits)) <= max_limits).all()
+                    assert (
+                        -((self.input_min * pos_limits) +
+                          (self.input_max * neg_limits)) <= max_limits).all()
 
             for group_index in range(self.groups):
                 perm = permutation_list[group_index]
@@ -409,7 +415,8 @@ class A2GPFQ(_AXE, GPFQ):
 
         thresholds, scales = self.get_scales_and_thresholds(weight)
         weight = weight.view(self.groups, -1, weight.shape[-1])  # [Groups, OC/Groups, IC]
-        weight_orig = weight_orig.view(self.groups, -1, weight_orig.shape[-1])  # [Groups, OC/Groups, IC]
+        weight_orig = weight_orig.view(
+            self.groups, -1, weight_orig.shape[-1])  # [Groups, OC/Groups, IC]
 
         # Get the diagonals of the covariance matrices here
         permutation_list = []
@@ -433,28 +440,22 @@ class A2GPFQ(_AXE, GPFQ):
             perm = perm.to(weight.device)
             permutation_list.append(perm)
 
-        Dg: Tensor = torch.zeros(
-            (self.groups, self.columns),
-            dtype=torch.float32)
-        Dh: Tensor = torch.zeros(
-            (self.groups, self.columns),
-            dtype=torch.float32)
+        Dg: Tensor = torch.zeros((self.groups, self.columns), dtype=torch.float32)
+        Dh: Tensor = torch.zeros((self.groups, self.columns), dtype=torch.float32)
         for group_index in range(self.groups):
             Dg[group_index].copy_(self.G[group_index].diag())
             Dh[group_index].copy_(self.H[group_index].diag())
         # if either norms are 0, the weight is effectively pruned
         Ds = torch.where(Dg * Dh != 0, Dg / Dh, 0)  # \hat{D}_tt / D_tt
 
-        Lg: Tensor = torch.zeros(
-            (self.groups, self.columns, self.columns),
-            device=dev,
-            dtype=torch.float32)
-        Lh: Tensor = torch.zeros(
-            (self.groups, self.columns, self.columns),
-            device=dev,
-            dtype=torch.float32)
+        Lg: Tensor = torch.zeros((self.groups, self.columns, self.columns),
+                                 device=dev,
+                                 dtype=torch.float32)
+        Lh: Tensor = torch.zeros((self.groups, self.columns, self.columns),
+                                 device=dev,
+                                 dtype=torch.float32)
         for group_index in range(self.groups):
-            L0g = torch.tril(self.G[group_index], -1) # L0
+            L0g = torch.tril(self.G[group_index], -1)  # L0
             L0h = torch.tril(self.H[group_index], -1)  # \hat{L0}
             Dhi = torch.where(Dh[group_index] != 0, 1. / Dh[group_index], 0)  # D^{-1}
             Lg[group_index].copy_(torch.diag(Dhi) @ L0g)
@@ -476,13 +477,15 @@ class A2GPFQ(_AXE, GPFQ):
                 i = permutation_list[group_index][t]
                 bx = i // self.max_accumulator_tile_size
 
-                w: Tensor = weight_orig[group_index, :, permutation_list[group_index][:t]].to(torch.float32)
-                q: Tensor = self.get_quant_weights(group_index, t, permutation_list).to(torch.float32)
+                w: Tensor = weight_orig[group_index, :,
+                                        permutation_list[group_index][:t]].to(torch.float32)
+                q: Tensor = self.get_quant_weights(group_index, t,
+                                                   permutation_list).to(torch.float32)
                 Lw = w.matmul(Lg[group_index, t, :t])
                 Lq = q.matmul(Lh[group_index, t, :t])
                 q_arg = Ds[group_index, t] * weight[group_index, :, i].to(torch.float32) + Lw - Lq
                 assert not torch.isnan(q_arg).any()
-                
+
                 # calculate the q_max and q_min for the right group and right block
                 s = scales[group_index, bx].to(torch.float32)
                 n = neg_limits[group_index, bx]
@@ -510,7 +513,10 @@ class A2GPFQ(_AXE, GPFQ):
                 neg_limits[group_index, bx, q <= 0] += q[q <= 0].to(lim_dtype)
                 assert (pos_limits >= 0).all()
                 assert (neg_limits <= 0).all()
-                assert (((self.input_max * pos_limits) + (self.input_min * neg_limits)) <= max_limits).all()
-                assert (-((self.input_min * pos_limits) + (self.input_max * neg_limits)) <= max_limits).all()
+                assert (((self.input_max * pos_limits) +
+                         (self.input_min * neg_limits)) <= max_limits).all()
+                assert (
+                    -((self.input_min * pos_limits) +
+                      (self.input_max * neg_limits)) <= max_limits).all()
 
         del thresholds, scales

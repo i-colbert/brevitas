@@ -176,7 +176,8 @@ class GPTQ(GPxQ):
                 self.H[i, :, :] = torch.linalg.cholesky(self.H[i, :, :])
                 self.H[i, :, :] = torch.cholesky_inverse(self.H[i, :, :])
                 # stabilizing the Cholesky decomposition with a fairly large constant, c
-                self.H[i, :, :] = torch.linalg.cholesky(self.H[i, :, :] * c, upper=True) / math.sqrt(c)
+                self.H[i, :, :] = torch.linalg.cholesky(
+                    self.H[i, :, :] * c, upper=True) / math.sqrt(c)
             h_inv = self.H
         except LinAlgError as e:
             warnings.warn(

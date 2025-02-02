@@ -11,8 +11,8 @@ from tqdm import tqdm
 from brevitas.graph.calibrate import disable_return_quant_tensor
 from brevitas.graph.calibrate import DisableEnableQuantization
 from brevitas.graph.calibrate import restore_return_quant_tensor
-from brevitas.graph.gpfq import gpfq_mode
 from brevitas.graph.gpfq import GPFQ
+from brevitas.graph.gpfq import gpfq_mode
 from brevitas.graph.gptq import GPTQ
 from brevitas.graph.gptq import gptq_mode
 from brevitas.utils.python_utils import recurse_getattr

@@ -5,10 +5,10 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 
-from brevitas.proxy.runtime_quant import ActQuantProxyFromInjectorBase
-from brevitas.function.shape import over_output_channels
 from brevitas.function.ops import get_upper_bound_on_l1_norm
+from brevitas.function.shape import over_output_channels
 from brevitas.nn.quant_layer import QuantWeightBiasInputOutputLayer as QuantWBIOL
+from brevitas.proxy.runtime_quant import ActQuantProxyFromInjectorBase
 from brevitas_examples.common.ep_init import l1_proj_matrix_per_channel
 
 
@@ -28,7 +28,7 @@ def apply_ep_init(model, dataloader, max_accumulator_bit_width):
     module_stats = {}
 
     def get_module_stats(module: QuantWBIOL):
-        
+
         weights: Tensor = module.weight.data
         scales: Tensor = module.weight_quant.scale()
         input_bit_width = module.input_quant.bit_width()
