@@ -8,7 +8,6 @@ from datetime import timedelta
 import functools
 import pprint
 import sys
-import pprint
 from warnings import warn
 
 import numpy as np
@@ -41,10 +40,10 @@ from brevitas_examples.common.parse_utils import quant_format_validator
 from brevitas_examples.llm.llm_quant.bias_corr import apply_bias_correction
 from brevitas_examples.llm.llm_quant.calibrate import apply_calibration
 from brevitas_examples.llm.llm_quant.data_utils import get_dataset_for_model
+from brevitas_examples.llm.llm_quant.ep_init import apply_ep_init
 from brevitas_examples.llm.llm_quant.equalize import apply_act_equalization
 from brevitas_examples.llm.llm_quant.equalize import apply_weight_equalization
 from brevitas_examples.llm.llm_quant.eval import compute_perplexity
-from brevitas_examples.llm.llm_quant.ep_init import apply_ep_init
 from brevitas_examples.llm.llm_quant.export import BlockQuantProxyLevelManager
 from brevitas_examples.llm.llm_quant.export import brevitas_proxy_export_mode
 from brevitas_examples.llm.llm_quant.gpxq import apply_gpfq
@@ -212,6 +211,7 @@ def validate(args):
 
 def quantize_llm(args):
     validate(args)
+    pprint.pprint(vars(args))
     set_seed(args.seed)
     if args.export_prefix is None:
         args.export_prefix = f"{args.model.replace('/', '--')}"
@@ -586,23 +586,17 @@ def quantize_llm(args):
 
             accelerator = Accelerator(
                 kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(seconds=3000))])
-            evaluation_tracker = EvaluationTracker(
-                output_dir="./results",
-                save_details=True,
-            )
+            evaluation_tracker = EvaluationTracker(output_dir="./results", save_details=True)
             pipeline_params = PipelineParameters(
                 launcher_type=ParallelismManager.ACCELERATE,
                 env_config=EnvConfig(cache_dir="/scratch/hf_models/"),
-                # Remove the 2 parameters below once your configuration is tested
-                override_batch_size=0,  # max_samples=10
-            )
+                override_batch_size=args.few_shot_override_batch_size)
             model_config = TransformersModelConfig(
                 pretrained=args.model,
                 dtype=dtype,
-                use_chat_template=True,
                 model_parallel=True,
                 accelerator=accelerator,
-                compile=False)
+                compile=True)
 
             with torch.no_grad(), quant_inference_mode(model):
                 model(**calibration_loader[0])
@@ -616,8 +610,7 @@ def quantize_llm(args):
                     evaluation_tracker=evaluation_tracker,
                     model=model,
                     config=model_config)
-
-            pipeline.evaluate()
+                pipeline.evaluate()
             results = pipeline.get_results()
             results = filter_results(results, list(results["results"].keys()))
             pprint.pprint(results)
@@ -633,10 +626,8 @@ def quantize_llm(args):
             model = model.to(dtype=torch.float32)
             model_export(model, calibration_loader[0], args)
 
-    metrics = {
-        "float_ppl": float_ppl,
-        "quant_ppl": quant_ppl}
-    tags=vars(args)
+    metrics = {"float_ppl": float_ppl, "quant_ppl": quant_ppl}
+    tags = vars(args)
 
     return model, metrics, tags
 
@@ -977,6 +968,11 @@ def parse_args(args, override_defaults={}):
         help='Whether to do zero or few shot eval. Default %(default)s)')
     parser.add_argument(
         '--few-shot-limit', type=int, default=None, help='Few shot limit. Default %(default)s)')
+    parser.add_argument(
+        '--few-shot-override-batch-size',
+        type=int,
+        default=None,
+        help='Few shot batch size override for lighteval. Default %(default)s)')
     parser.add_argument(
         '--few-shot-tasks',
         default=['arc_challenge', 'arc_easy', 'winogrande', 'piqa'],
