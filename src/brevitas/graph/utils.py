@@ -171,3 +171,9 @@ def get_node(graph_model, name):
 
 def is_quant_module(module):
     return isinstance(module, QuantWBIOL)
+
+
+def remove_weight_orig(model: nn.Module):
+    for name, module in model.named_modules():
+        if hasattr(module, 'weight_orig'):
+            del module.weight_orig

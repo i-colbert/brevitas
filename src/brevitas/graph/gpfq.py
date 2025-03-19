@@ -215,6 +215,8 @@ class GPFQ(GPxQ):
 
         if hasattr(self.layer, 'offload_params'):
             self.layer.offload_params(self.layer)
+        if self.create_weight_orig:
+            self.layer.weight_orig = self.layer.weight_orig.cpu()
 
 
 class gpfq_mode(gpxq_mode):

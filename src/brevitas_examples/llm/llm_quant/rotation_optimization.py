@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from dataclasses import field
 import os
+import warnings
 from typing import List, Optional
 
 from accelerate.utils import DistributedType
@@ -92,15 +93,17 @@ def apply_rotation_optimization(
     # Prepare dataset and model for training
     train_dataset = _prepare_train_dataset(train_dataset)
     model = _prepare_model(model)
-    # Enable skipping optimization
-    if training_args.max_steps <= 0:
-        return
     # Remove hooks and empty cache before starting optimization
     remove_hooks(model)
     torch.cuda.empty_cache()
     # Set to False the model parameters
     for param in model.parameters():
         param.requires_grad = False
+    # Enable skipping optimization
+    if training_args.max_steps <= 0:
+        warnings.warn("Skipping optimization, as max_steps is set to 0")
+        model.eval()
+        return
     # Collect trainable matrices
     trainable_rotations = extract_trainable_rotation_matrices(model)
     for rot_mat in trainable_rotations:

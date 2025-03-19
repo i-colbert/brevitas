@@ -171,9 +171,9 @@ class gpxq_mode(ABC):
                 self.model, is_training=self.model.training)
             restore_return_quant_tensor(self.model, self.return_quant_tensor_state)
 
-    def update(self):
+    def update(self, *args, **kwargs):
         for name in self.current_layer.layer_names:
-            self.gpxq_layers[name].single_layer_update()
+            self.gpxq_layers[name].single_layer_update(*args, **kwargs)
             self.hook_dict[name].remove()
         self.current_layer.layer_names.clear()
 

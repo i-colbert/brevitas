@@ -267,6 +267,7 @@ def generate_quantizers(
         quantize_input_zero_point=False,
         scale_rounding_func_type=None,
         device=None,
+        weight_narrow_range=False,
         weight_kwargs=None,
         input_kwargs=None,
         quant_attn_mode='mha',
@@ -355,7 +356,7 @@ def generate_quantizers(
     weight_quant = weight_quant.let(
         **{
             'bit_width': weight_bit_width,
-            'narrow_range': False,
+            'narrow_range': weight_narrow_range,
             'quantize_zero_point': quantize_weight_zero_point},
         **weight_float_format)
 
@@ -386,7 +387,7 @@ def generate_quantizers(
 
     if quant_attn_mode == 'sdpa':
         kv_permute_dims = (0, 1, 3, 2)
-        kv_broadcastable_shape_lambda = lambda x, shape: x.view(shape[0], 1, shape[-2], shape[-1])
+        kv_broadcastable_shape_lambda = lambda x, shape: x.view(shape[0], shape[1], 1, shape[-1])
     elif quant_attn_mode == 'mha':
         kv_permute_dims = (0, 2, 1)
         kv_broadcastable_shape_lambda = lambda x, shape: x.view(shape[0], 1, shape[-1])

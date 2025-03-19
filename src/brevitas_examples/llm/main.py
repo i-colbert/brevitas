@@ -8,6 +8,7 @@ from datetime import timedelta
 import functools
 import pprint
 import sys
+import time
 
 import numpy as np
 from optimum.exporters.onnx import onnx_export_from_model
@@ -28,6 +29,7 @@ from brevitas.graph.equalize import LayerwiseActivationRotation
 from brevitas.graph.quantize import functional_quantization_mode
 from brevitas.graph.quantize import layerwise_quantize
 from brevitas.graph.utils import get_module
+from brevitas.graph.utils import remove_weight_orig
 from brevitas.nn.quant_sdpa import ScaledDotProductAttention
 from brevitas.utils.python_utils import hooked_on_a_function
 from brevitas_examples.common.accelerate_utils.accelerate import offload_model
@@ -45,6 +47,7 @@ from brevitas_examples.llm.llm_quant.equalize import apply_weight_equalization
 from brevitas_examples.llm.llm_quant.eval import compute_perplexity
 from brevitas_examples.llm.llm_quant.export import BlockQuantProxyLevelManager
 from brevitas_examples.llm.llm_quant.export import brevitas_proxy_export_mode
+from brevitas_examples.llm.llm_quant.gpxq import apply_qronos
 from brevitas_examples.llm.llm_quant.gpxq import apply_gpfq
 from brevitas_examples.llm.llm_quant.gpxq import apply_gptq
 from brevitas_examples.llm.llm_quant.gpxq import apply_magr
@@ -122,11 +125,6 @@ def fused_rotation_no_fx(model, calibration_loader, args):
     remove_hooks(new_model)
 
 
-def set_seed(seed):
-    np.random.seed(seed)
-    torch.random.manual_seed(seed)
-
-
 def model_export(model, ref_input, args):
     if args.export_target == 'sharded_torchmlir_group_weight':
         from brevitas_examples.llm.llm_quant.sharded_mlir_group_export import \
@@ -177,8 +175,10 @@ def quantize_llm(args, extra_args=None):
     print("Model loaded.")
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    float_ppl = None
-    quant_ppl = None
+    float_ppl_train = None
+    float_ppl_test = None
+    quant_ppl_train = None
+    quant_ppl_test = None
 
     if args.load_awq:
         from brevitas_examples.llm.llm_quant.awq.pre_quant import apply_awq
@@ -191,7 +191,7 @@ def quantize_llm(args, extra_args=None):
     # Load the data for calibration and evaluation.
     calibration_loader = get_dataset_for_model(
         args.model,
-        bos_preprocessing=not args.no_bos_preprocessing,
+        bos_preprocessing=args.bos_preprocessing,
         dataset_name=args.dataset,
         tokenizer=tokenizer,
         nsamples=args.nsamples,
@@ -203,7 +203,7 @@ def quantize_llm(args, extra_args=None):
 
     validation_loader = get_dataset_for_model(
         args.model,
-        bos_preprocessing=not args.no_bos_preprocessing,
+        bos_preprocessing=args.bos_preprocessing,
         dataset_name=args.dataset,
         tokenizer=tokenizer,
         nsamples=args.nsamples,
@@ -219,7 +219,8 @@ def quantize_llm(args, extra_args=None):
         # Load the data for rotation optimization
         rot_calibration_loader = get_dataset_for_model(
             args.model,
-            dataset_name=args.dataset,
+            bos_preprocessing=args.bos_preprocessing,
+            dataset_name=args.dataset_rot_calibration,
             tokenizer=tokenizer,
             nsamples=args.nsamples_rot_calibration,
             seqlen=args.seqlen,
@@ -235,10 +236,12 @@ def quantize_llm(args, extra_args=None):
         assert args.export_target != 'torch_qcdq', "TorchScript QCDQ export and Evaluation simultaneously"
         print("Float model eval...")
         model = offload_model(model)
-        float_ppl = compute_perplexity(
+        float_ppl_train = compute_perplexity(
+            model, calibration_loader, context_length=args.seqlen // 2, tokenizer=tokenizer)
+        float_ppl_test = compute_perplexity(
             model, validation_loader, context_length=args.seqlen // 2, tokenizer=tokenizer)
         remove_hooks(model)
-        print(f"Float perplexity ({args.dataset}): {float_ppl:.3f}")
+        print(f"Float perplexity ({args.dataset}): {float_ppl_train:.3f} train, {float_ppl_test:.3f} test")
 
     if args.replace_rmsnorm:
         model = replace_rmsnorm_with_torch(model, model.config)
@@ -346,6 +349,7 @@ def quantize_llm(args, extra_args=None):
             weight_quant_granularity=args.weight_quant_granularity,
             weight_group_size=args.weight_group_size,
             weight_group_dim=args.weight_group_dim,
+            weight_narrow_range=args.weight_narrow_range,
             quantize_weight_zero_point=args.quantize_weight_zero_point,
             weight_quant_format=args.weight_quant_format,
             input_bit_width=args.input_bit_width,
@@ -363,6 +367,11 @@ def quantize_llm(args, extra_args=None):
             quant_attn_mode='sdpa' if (quant_sdpa_fx or args.functional_sdpa_quant) else 'mha',
             device=device,
             scaling_min_val=args.scaling_min_val)
+        # if SDPA quantization is enabled, this means that only the KV cache is quantized and
+        # softmax is left in a higher precision
+        if args.disable_sdpa_attn_quant:
+            attn_output_weights_quant = None
+            q_scaled_quant = None
         layer_map = generate_quant_maps(
             linear_input_quant=linear_input_quant,
             weight_quant=weight_quant,
@@ -451,12 +460,13 @@ def quantize_llm(args, extra_args=None):
             print("Act calibration applied.")
 
         if args.optimize_rotations:
+            if args.load_checkpoint:
+                rot_optimization_args.max_steps = 0
             apply_rotation_optimization(
                 model=model,
                 tokenizer=tokenizer,
                 train_dataset=rot_calibration_loader,
-                training_args=rot_optimization_args,
-            )
+                training_args=rot_optimization_args)
             # Remove hooks from optimization
             remove_hooks(model)
             # Offload model before fusing the rotations
@@ -508,8 +518,10 @@ def quantize_llm(args, extra_args=None):
                 model.load_state_dict(torch.load(args.checkpoint_name, map_location='cpu'))
             model = offload_model(model)
 
-        if args.gptq and not args.load_checkpoint:
+        gpxq_time = None
+        if args.gptq:
             print("Applying GPTQ...")
+            start_time = time.time()
             apply_gptq(
                 model,
                 calibration_loader,
@@ -519,10 +531,12 @@ def quantize_llm(args, extra_args=None):
                 block_name=args.gpxq_block_name,
                 max_accumulator_bit_width=args.gpxq_max_accumulator_bit_width,
                 max_accumulator_tile_size=args.gpxq_max_accumulator_tile_size)
+            gpxq_time = time.time() - start_time
             print("GPTQ applied.")
 
-        if args.gpfq and not args.load_checkpoint:
+        if args.gpfq:
             print("Applying GPFQ...")
+            start_time = time.time()
             apply_gpfq(
                 model,
                 calibration_loader,
@@ -530,7 +544,22 @@ def quantize_llm(args, extra_args=None):
                 block_name=args.gpxq_block_name,
                 max_accumulator_bit_width=args.gpxq_max_accumulator_bit_width,
                 max_accumulator_tile_size=args.gpxq_max_accumulator_tile_size)
+            gpxq_time = time.time() - start_time
             print("GPFQ applied.")
+
+        if args.qronos:
+            print("Applying Qronos...")
+            start_time = time.time()
+            apply_qronos(
+                model,
+                calibration_loader,
+                act_order=args.gpxq_act_order,
+                block_name=args.gpxq_block_name,
+                max_accumulator_bit_width=args.gpxq_max_accumulator_bit_width,
+                max_accumulator_tile_size=args.gpxq_max_accumulator_tile_size,
+                percdamp=args.gpxq_percdamp)
+            gpxq_time = time.time() - start_time
+            print("Qronos applied.")
 
         if args.bias_corr and not args.load_checkpoint:
             print("Applying bias correction...")
@@ -541,14 +570,17 @@ def quantize_llm(args, extra_args=None):
         for k, v in dict_hooks.items():
             k._hf_hook.post_forward = v
 
-        if args.eval and not args.no_quantize:
+        remove_weight_orig(model)
 
+        if args.eval and not args.no_quantize:
             print("Model eval...")
             with torch.no_grad(), quant_inference_mode(model, compile=args.compile_eval):
                 model(**calibration_loader[0])
-                quant_ppl = compute_perplexity(
+                quant_ppl_train = compute_perplexity(
+                    model, calibration_loader, context_length=args.seqlen // 2, tokenizer=tokenizer)
+                quant_ppl_test = compute_perplexity(
                     model, validation_loader, context_length=args.seqlen // 2, tokenizer=tokenizer)
-            print(f"Quantized perplexity ({args.dataset}): {quant_ppl:.3f}")
+            print(f"Quantized perplexity ({args.dataset}): {quant_ppl_train:.3f} train, {quant_ppl_test:.3f} test")
 
         few_shot_eval_results = dict()
         if args.few_shot_eval == 'lm_eval':
@@ -612,6 +644,7 @@ def quantize_llm(args, extra_args=None):
                 few_shot_eval_results, list(few_shot_eval_results["results"].keys()))
             pprint.pprint(few_shot_eval_results)
         remove_hooks(model)
+
         if args.checkpoint_name is not None and not args.load_checkpoint:
             print(f"Saving checkpoint to {args.checkpoint_name}")
             torch.save(model.state_dict(), args.checkpoint_name)
@@ -622,7 +655,15 @@ def quantize_llm(args, extra_args=None):
             model = model.to(dtype=torch.float32)
             model_export(model, calibration_loader[0], args)
 
-    return {"float_ppl": float_ppl, "quant_ppl": quant_ppl, **few_shot_eval_results}, model
+    results = {
+        "float_ppl_train": float_ppl_train,
+        "float_ppl_test": float_ppl_test,
+        "quant_ppl_train": quant_ppl_train,
+        "quant_ppl_test": quant_ppl_test,
+        "gpxq_time": gpxq_time,
+        **few_shot_eval_results}
+
+    return results, model
 
 
 def override_defaults(args):
@@ -665,7 +706,8 @@ def parse_args(args, override_defaults={}):
 def main():
     overrides = override_defaults(sys.argv[1:])
     args, extra_args = parse_args(sys.argv[1:], override_defaults=overrides)
-    quantize_llm(args, extra_args)
+    results, _ = quantize_llm(args, extra_args)
+    pprint.pprint(results)
 
 
 if __name__ == '__main__':

@@ -49,12 +49,20 @@ def create_llm_args_parser():
         default='wikitext2',
         help='Dataset to use for quantization (default: %(default)s)')
     parser.add_argument(
+        '--dataset-rot-calibration',
+        type=str,
+        choices=['wikitext2', 'c4', 'pile'],
+        default='c4',
+        help='Dataset to use for rotation optimization (default: %(default)s)')
+    parser.add_argument(
         '--gpxq-block-name',
         type=str,
         default=None,
         help=
         'Block name for faster GPxQ optimization. It works only if FX is not needed (default: %(default)s)'
     )
+    parser.add_argument(
+        '--gpxq-percdamp', type=float, default=0.01, help='GPxQ percdamp (default: %(default)s)')
     parser.add_argument(
         '--weight-bit-width', type=int, default=8, help='Weight bit width. Default: 8.')
     parser.add_argument(
@@ -107,6 +115,7 @@ def create_llm_args_parser():
         help='Group size for per_group weight quantization. Default: 128.')
     parser.add_argument(
         '--quantize-weight-zero-point', action='store_true', help='Quantize weight zero-point.')
+    parser.add_argument('--weight-narrow-range', action='store_true')
     parser.add_argument(
         '--input-bit-width',
         type=int,
@@ -168,6 +177,9 @@ def create_llm_args_parser():
         'Granularity for scales/zero-point of KV cache. If not set, it will use input-quant-granularity. Default: %(default)s'
     )
     parser.add_argument(
+        '--disable-sdpa-attn-quant',
+        action='store_true', help='When quantizing SDPA, disable attention quantization.')
+    parser.add_argument(
         '--input-group-size',
         type=int,
         default=64,
@@ -203,8 +215,9 @@ def create_llm_args_parser():
     parser.add_argument('--magr', action='store_true', help='Apply MagR.')
     parser.add_argument(
         '--magr-alpha', type=float, default=0.01, help='Alpha for MagR. Default: 0.01.')
-    parser.add_argument('--gptq', action='store_true', help='Apply GPTQ.')
+    parser.add_argument('--gptq', action='store_true', help='Apply GPTQ, also known as OPTQ.')
     parser.add_argument('--gpfq', action='store_true', help='Apply GPFQ.')
+    parser.add_argument('--qronos', action='store_true', help='Apply Qronos.')
     parser.add_argument(
         '--gpxq-act-order', action='store_true', help='Apply GPxQ activation ordering.')
     parser.add_argument(
@@ -375,9 +388,11 @@ def create_llm_args_parser():
         action="store_true",
         help='Whether to do zero or few shot eval. Default %(default)s)')
     parser.add_argument(
-        '--no-bos-preprocessing',
-        action="store_true",
-        help='Do not add BOS token during pre-processing. Default %(default)s)')
+        '--bos-preprocessing',
+        type=str,
+        default=None,
+        choices=['sentence', 'sequence'],
+        help='Type of BOS token pre-processing for training and evaluation datasets. Default %(default)s)')
     parser.add_argument(
         '--few-shot-limit', type=int, default=None, help='Few shot limit. Default %(default)s)')
     parser.add_argument(
@@ -409,6 +424,8 @@ def validate(args, extra_args: Optional[List[str]] = None):
     elif args.rotation == 'fused_no_fx':
         assert not args.convert_layernorm_to_rmsnorm, 'LayerNorm is automatically replaced with RMSNorm when running with --rotation=fused_no_fx. Remove the flag --convert-layernorm-to-rmsnorm'
         assert args.replace_rmsnorm, 'Graph rotation requires to replace HF RMSNorm with PyTorch ones (torch 2.4+ require)'
+    if args.bos_preprocessing is not None:
+        assert args.bos_preprocessing in ['sentence', 'sequence'], f"bos_preprocessing should be either 'sentence' or 'sequence' but found {args.bos_preprocessing}"
     if not args.no_quantize:
         if args.gptq and args.gpfq:
             warn("Both GPTQ and GPFQ are enabled.")

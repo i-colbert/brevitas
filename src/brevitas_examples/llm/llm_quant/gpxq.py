@@ -11,6 +11,7 @@ from tqdm import tqdm
 from brevitas.graph.calibrate import disable_return_quant_tensor
 from brevitas.graph.calibrate import DisableEnableQuantization
 from brevitas.graph.calibrate import restore_return_quant_tensor
+from brevitas.graph.qronos import Qronos
 from brevitas.graph.gpfq import GPFQ
 from brevitas.graph.gpfq import gpfq_mode
 from brevitas.graph.gptq import GPTQ
@@ -22,21 +23,21 @@ from brevitas_examples.common.axe import A2GPFQ
 from brevitas_examples.common.axe import A2GPTQ
 
 
-def _gpxq_block_optimization_callback(block, gpxq, cached_args, cached_kwargs):
+def _gpxq_block_optimization_callback(block, gpxq, cached_args, cached_kwargs, update_kwargs):
     for _ in tqdm(range(gpxq.num_layers), desc="Layers", leave=False):
         for args, kwargs in zip(cached_args, cached_kwargs):
             args = send_to_device(args, 'cuda')
             kwargs = send_to_device(kwargs, 'cuda')
             block(*args, **kwargs)
-        gpxq.update()
+        gpxq.update(**update_kwargs)
 
 
-def _magr_block_optimization_callback(block, magr, cached_args, cached_kwargs):
+def _magr_block_optimization_callback(block, magr, cached_args, cached_kwargs, update_kwargs):
     for args, kwargs in zip(cached_args, cached_kwargs):
         args = send_to_device(args, 'cuda')
         kwargs = send_to_device(kwargs, 'cuda')
         block(*args, **kwargs)
-    magr.update()
+    magr.update(**update_kwargs)
 
 
 @torch.no_grad()
@@ -46,6 +47,7 @@ def block_optimization(
         block_name,
         context_manager_func,
         context_manager_kwargs,
+        update_kwargs,
         block_optimization_callback=_gpxq_block_optimization_callback):
     disable_quant_inference = DisableEnableQuantization()
     cache_state = model.config.use_cache
@@ -92,7 +94,7 @@ def block_optimization(
     # Iterate through all the blocks
     for index, block in tqdm(enumerate(blocks), desc="Blocks", total=len(blocks)):
         with context_manager_func(block, **context_manager_kwargs) as gpxq:
-            block_optimization_callback(block, gpxq, cached_args, cached_kwargs)
+            block_optimization_callback(block, gpxq, cached_args, cached_kwargs, update_kwargs)
 
         if index < len(blocks) - 1:
             # Once the block is done, we need to update the input to the next block
@@ -150,7 +152,8 @@ def apply_gptq(
             'create_weight_orig': create_weight_orig,
             'use_quant_activations': use_quant_activations,
             'gptq_class': gptq_class}
-        block_optimization(model, dataloader, block_name, gptq_mode, context_manager_kwargs)
+        update_kwargs = { }  # TODO: connect percdamp to CLI
+        block_optimization(model, dataloader, block_name, gptq_mode, context_manager_kwargs, {})
     else:
         with gptq_mode(model,
                        use_quant_activations=use_quant_activations,
@@ -165,15 +168,16 @@ def apply_gptq(
                 gptq.update()
 
 
-@torch.no_grad()
-def apply_gpfq(
+def _gpfq_callback(
         model,
         dataloader,
         act_order=True,
         group_of_parallel_layers=None,
         block_name=None,
         max_accumulator_bit_width=None,
-        max_accumulator_tile_size=None):
+        max_accumulator_tile_size=None,
+        gpfq_class=GPFQ,
+        **kwargs):
     if max_accumulator_bit_width is not None:
         # Use accumulator-aware extension (AXE) framework
         print(f"Using AXE to target {max_accumulator_bit_width}-bit accumulation...")
@@ -181,15 +185,13 @@ def apply_gpfq(
             A2GPFQ,
             max_accumulator_bit_width=max_accumulator_bit_width,
             max_accumulator_tile_size=max_accumulator_tile_size)
-    else:
-        gpfq_class = GPFQ
     if block_name is not None:
         context_manager_kwargs = {
             'act_order': act_order,
             'group_of_parallel_layers': group_of_parallel_layers,
             'create_weight_orig': True,
             'gpfq_class': gpfq_class}
-        block_optimization(model, dataloader, block_name, gpfq_mode, context_manager_kwargs)
+        block_optimization(model, dataloader, block_name, gpfq_mode, context_manager_kwargs, update_kwargs=kwargs)
     else:
         with gpfq_mode(model,
                        act_order=act_order,
@@ -201,6 +203,51 @@ def apply_gpfq(
                 for inps in dataloader:
                     gpfq_model(**inps)
                 gpfq.update()
+
+
+@torch.no_grad()
+def apply_gpfq(
+        model,
+        dataloader,
+        act_order=True,
+        group_of_parallel_layers=None,
+        block_name=None,
+        max_accumulator_bit_width=None,
+        max_accumulator_tile_size=None):
+    _gpfq_callback(
+        model,
+        dataloader,
+        act_order=act_order,
+        group_of_parallel_layers=group_of_parallel_layers,
+        block_name=block_name,
+        max_accumulator_bit_width=max_accumulator_bit_width,
+        max_accumulator_tile_size=max_accumulator_tile_size,
+        gpfq_class=GPFQ)
+    
+
+@torch.no_grad()
+def apply_qronos(
+        model,
+        dataloader,
+        act_order=True,
+        group_of_parallel_layers=None,
+        block_name=None,
+        percdamp=1e-5,
+        max_accumulator_bit_width=None,
+        max_accumulator_tile_size=None):
+    if max_accumulator_bit_width is not None:
+        raise NotImplementedError("Qronos implementation does not support AXE yet.")
+    # We use the GPFQ callback, which uses two forward passes
+    _gpfq_callback(
+        model,
+        dataloader,
+        act_order=act_order,
+        group_of_parallel_layers=group_of_parallel_layers,
+        block_name=block_name,
+        max_accumulator_bit_width=max_accumulator_bit_width,
+        max_accumulator_tile_size=max_accumulator_tile_size,
+        gpfq_class=Qronos,
+        percdamp=percdamp)
 
 
 @torch.no_grad()
