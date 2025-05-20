@@ -2,11 +2,14 @@ act_calibration: false
 act_equalization: null
 act_equalization_alpha: 0.5
 bias_corr: false
+bos_preprocessing: null
 checkpoint_name: null
 compile_eval: false
 compile_ptq: false
 convert_layernorm_to_rmsnorm: false
 dataset: wikitext2
+dataset_rot_calibration: c4
+disable_sdpa_attn_quant: false
 dtype: float16
 eval: false
 export_prefix: null
@@ -29,6 +32,7 @@ gpxq_block_name: null
 gpxq_create_weight_orig: false
 gpxq_max_accumulator_bit_width: null
 gpxq_max_accumulator_tile_size: null
+gpxq_percdamp: 0.01
 gpxq_use_quant_activations: false
 input_bit_width: null
 input_group_size: 64
@@ -50,12 +54,14 @@ learned_round_scale_momentum: 0.9
 ln_affine_merge: false
 load_awq: null
 load_checkpoint: false
+magr: false
+magr_alpha: 0.01
 model: facebook/opt-125m
-no_bos_preprocessing: false
 no_quantize: false
 nsamples: 128
 nsamples_rot_calibration: 800
 optimize_rotations: false
+qronos: false
 quant_sdpa: false
 quantize_input_zero_point: false
 quantize_last_layer: false
@@ -78,6 +84,7 @@ weight_bit_width: 8
 weight_equalization: false
 weight_group_dim: null
 weight_group_size: 128
+weight_narrow_range: false
 weight_param_method: stats
 weight_quant_format: int
 weight_quant_granularity: per_group
