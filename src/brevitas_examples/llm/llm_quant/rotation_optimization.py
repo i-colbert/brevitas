@@ -11,6 +11,7 @@ import transformers
 from transformers import Trainer
 from transformers.tokenization_utils import PreTrainedTokenizerBase
 
+from brevitas.graph.calibrate import DisableEnableQuantization
 from brevitas.optim.cailey_sgd import CaileySGD
 from brevitas.utils.parametrization_utils import extract_trainable_rotation_matrices
 from brevitas_examples.common.accelerate_utils.accelerate import remove_hooks
@@ -24,6 +25,9 @@ class TrainingArguments(transformers.TrainingArguments):
     # NOTE: Currently, there is no infrastructure to resume training
     # from a checkpoint, so related files are not save by default
     save_strategy: Optional[str] = field(default="no")
+    # NOTE: the SpinQuant recipe does not enable weight quantization 
+    # during Cayley optimization of the rotation matrices
+    train_with_param_quantization: bool = field(default=False)
 
 
 def parse_rotation_optimization_args(extra_args: Optional[List[str]] = None) -> TrainingArguments:
@@ -104,6 +108,13 @@ def apply_rotation_optimization(
         warnings.warn("Skipping optimization, as max_steps is set to 0")
         model.eval()
         return
+
+    # if param quantization is not enabled, then we disable during training
+    disable_quant_inference = DisableEnableQuantization()
+    if not training_args.train_with_param_quantization:
+        print("Disabling weight quantization during rotation optimization")
+        disable_quant_inference.disable_param_quantization(model, is_training=False)
+
     # Collect trainable matrices
     trainable_rotations = extract_trainable_rotation_matrices(model)
     for rot_mat in trainable_rotations:
@@ -120,3 +131,7 @@ def apply_rotation_optimization(
     trainer.train()
     # After finishing training, set eval mode again
     model.eval()
+
+    # re-enable param quantization if disabled during training
+    if not training_args.train_with_param_quantization:
+        disable_quant_inference.enable_param_quantization(model, is_training=False)
