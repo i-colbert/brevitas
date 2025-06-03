@@ -91,6 +91,12 @@ def create_llm_args_parser():
         'Weight quantization type. Either int or eXmY, with X+Y==weight_bit_width-1. It\'s possible to add float_ocp_ or float_fnuz_ before the exponent/mantissa bitwidth. Default: int.'
     )
     parser.add_argument(
+        '--weight-scale-affine-scalar',
+        type=float,
+        default=1.,
+        help="Multiplicative scalar to shrink the weight scale. Default: 1.0"
+    )
+    parser.add_argument(
         '--weight-quant-granularity',
         type=str,
         default='per_group',

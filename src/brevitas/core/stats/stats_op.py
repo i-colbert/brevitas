@@ -28,22 +28,23 @@ class NegativeMinOrZero(brevitas.jit.ScriptModule):
 
     def __init__(
             self,
+            beta: float = 1.0,
             stats_reduce_dim: Optional[int] = None,
-            dtype: Optional[torch.dtype] = None,
             device: Optional[torch.device] = None,
             keepdim: bool = False) -> None:
         super(NegativeMinOrZero, self).__init__()
         self.stats_reduce_dim = stats_reduce_dim
-        self.zero = StatelessBuffer(torch.tensor(0.0, dtype=dtype, device=device))
+        self.zero = StatelessBuffer(torch.tensor(0.0, dtype=torch.float32, device=device))
+        self.beta = StatelessBuffer(torch.tensor(beta, dtype=torch.float32, device=device))
         self.keepdim = keepdim
 
     @brevitas.jit.script_method
     def forward(self, x: Tensor) -> Tensor:
         if self.stats_reduce_dim is None:
-            min_val = torch.min(x)
+            min_val = torch.min(x).to(torch.float32)
         else:
-            min_val = torch.min(x, dim=self.stats_reduce_dim, keepdim=self.keepdim)[0]
-        min_val = torch.clamp(min_val, max=self.zero())
+            min_val = torch.min(x, dim=self.stats_reduce_dim, keepdim=self.keepdim)[0].to(torch.float32)
+        min_val = (self.beta() * torch.clamp(min_val, max=self.zero())).to(x.dtype)
         return min_val
 
 
@@ -179,26 +180,29 @@ class AbsMinMax(brevitas.jit.ScriptModule):
 
     def __init__(
             self,
+            beta: float = 1.,
             stats_reduce_dim: Optional[int] = None,
             keepdim: bool = False,
-            dtype: Optional[torch.dtype] = None,
             device: Optional[torch.device] = None) -> None:
         super(AbsMinMax, self).__init__()
         self.stats_reduce_dim = stats_reduce_dim
         self.keepdim = keepdim
-        self.zero = StatelessBuffer(torch.tensor(0.0, dtype=dtype, device=device))
+        self.zero = StatelessBuffer(torch.tensor(0.0, dtype=torch.float32, device=device))
+        self.beta = StatelessBuffer(torch.tensor(beta, dtype=torch.float32, device=device))
 
     @brevitas.jit.script_method
     def forward(self, x: Tensor):
         if self.stats_reduce_dim is None:
-            max_val = torch.max(x)
-            min_val = torch.min(x)
+            max_val = torch.max(x).to(torch.float32)
+            min_val = torch.min(x).to(torch.float32)
         else:
-            max_val = torch.max(x, dim=self.stats_reduce_dim, keepdim=self.keepdim)[0]
-            min_val = torch.min(x, dim=self.stats_reduce_dim, keepdim=self.keepdim)[0]
+            max_val = torch.max(x, dim=self.stats_reduce_dim, keepdim=self.keepdim)[0].to(torch.float32)
+            min_val = torch.min(x, dim=self.stats_reduce_dim, keepdim=self.keepdim)[0].to(torch.float32)
         # We need to make sure the lower bound is not positive to align with zero-point statistics
         min_val = torch.clamp(min_val, max=self.zero())
-        return torch.abs(max_val - min_val)
+        # We do our scaling in float32 before recasting
+        min_max = (self.beta() * torch.abs(max_val - min_val)).to(x.dtype)
+        return min_max
 
 
 class AbsMaxAve(brevitas.jit.ScriptModule):

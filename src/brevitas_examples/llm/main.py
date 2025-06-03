@@ -365,6 +365,7 @@ def quantize_llm(args, extra_args=None):
             quantize_input_zero_point=args.quantize_input_zero_point,
             scale_rounding_func_type=args.scale_rounding_func_type,
             quant_attn_mode='sdpa' if (quant_sdpa_fx or args.functional_sdpa_quant) else 'mha',
+            weight_kwargs={"beta": args.weight_scale_affine_scalar},
             device=device,
             scaling_min_val=args.scaling_min_val)
         # if SDPA quantization is enabled, this means that only the KV cache is quantized and
