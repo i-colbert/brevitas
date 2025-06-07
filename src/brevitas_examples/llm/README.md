@@ -2,6 +2,8 @@
 
 This branch is intended to ease reproduction of the results in our paper: "[Qronos: Correcting the Past by Shaping the Future... in Post-Training Quantization](https://arxiv.org/abs/2505.11695)"
 
+🚨 This branch is not intended to be maintained, Qronos support is added to mainline Brevitas here:
+https://github.com/Xilinx/brevitas/pull/1311
 
 ## Citation
 
