@@ -204,6 +204,57 @@ def get_wikitext2(
     return dataloader
 
 
+def get_commonsense_qa(
+        raw_dataset: Dataset,
+        tokenizer: PreTrainedTokenizerBase,
+        seqlen: int,
+        nsamples: int,
+        split: str = 'train',
+        add_bos_token: bool = False,
+        add_chat_template: bool = True,
+        seed: int = 42) -> List[Dict[str, torch.Tensor]]:
+    random.seed(seed)
+    # Add BOS token to each sequence if add_bos_token is True and the tokenizer supports this token
+    if add_bos_token and tokenizer.bos_token_id is not None:
+        seqlen = seqlen - 1
+        sequence_process_fn = lambda inp: torch.cat([
+            torch.tensor([[tokenizer.bos_token_id]], dtype=inp.dtype, device=inp.device), inp],
+                                                    dim=1)
+    else:
+        # Identity, the BOS token is not added
+        sequence_process_fn = lambda inp: inp
+
+    def _apply_chat_template(line):
+        if not add_chat_template:
+            return line["question"]
+        # Using a chat template similar to lighteval: https://github.com/huggingface/lighteval/blob/main/src/lighteval/tasks/default_prompts.py#L672
+        letter_indices = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"]
+        query = f"The following are multiple choice questions (with answers) about common sense.\nQuestion: {line['question']}\n"
+        query += "".join(
+            [f"{key}. {choice}\n" for key, choice in zip(letter_indices, [f" {c}" for c in line["choices"]["text"]])]
+        )
+        query += "Answer:\n"
+        return query
+
+    raw_text = "\n\n".join([_apply_chat_template(line) for line in raw_dataset])
+    data = tokenizer(raw_text, return_tensors='pt')
+    dataloader = []
+    if split == 'train':
+        for _ in tqdm(range(nsamples)):
+            i = random.randint(0, data.input_ids.shape[1] - seqlen - 1)
+            j = i + seqlen
+            inp = sequence_process_fn(data.input_ids[:, i:j])
+            attention_mask = torch.ones_like(inp)
+            dataloader.append({'input_ids': inp, 'attention_mask': attention_mask})
+    elif split in ['test', 'validation']:
+        nsamples = data['input_ids'].numel() // seqlen
+        for i in tqdm(range(nsamples)):
+            batch = sequence_process_fn(data['input_ids'][:, (i * seqlen):((i + 1) * seqlen)])
+            attention_mask = torch.ones_like(batch)
+            dataloader.append({'input_ids': batch, 'attention_mask': attention_mask})
+    return dataloader
+
+
 def load_raw_dataset(dataset_name: str, split: str, seed: int = 42) -> Dataset:
     if dataset_name == "wikitext2":
         data = load_dataset('wikitext', 'wikitext-2-raw-v1', split=split)
@@ -228,6 +279,8 @@ def load_raw_dataset(dataset_name: str, split: str, seed: int = 42) -> Dataset:
             warnings.warn(
                 f"There is no available validation split for pile. Defaulting to wikitext2.")
             data = load_dataset('wikitext', 'wikitext-2-raw-v1', split=split)
+    elif dataset_name == "commonsense_qa":
+        data = load_dataset("tau/commonsense_qa", split=split)
     else:
         raise ValueError(f"Dataset {dataset_name} is not available")
     return data

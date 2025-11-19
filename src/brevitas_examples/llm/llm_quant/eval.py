@@ -103,4 +103,4 @@ def compute_perplexity(
 
     ppl = torch.exp(torch.stack(nlls).mean())
 
-    return ppl
+    return ppl.item()

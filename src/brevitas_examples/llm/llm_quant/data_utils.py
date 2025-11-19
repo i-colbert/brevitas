@@ -39,6 +39,7 @@ from transformers import AutoConfig
 
 from brevitas_examples.llm.llm_quant.data import get_clm_dataset
 from brevitas_examples.llm.llm_quant.data import get_wikitext2
+from brevitas_examples.llm.llm_quant.data import get_commonsense_qa
 from brevitas_examples.llm.llm_quant.data import load_raw_dataset
 
 
@@ -111,6 +112,20 @@ def get_dataset_for_model(
                 "Wikitext2 does not support document-level BOS. Default to sequence-level.")
         # Wikitext2 preprocessing matches the preprocessing in https://github.com/IST-DASLab/gptq/blob/main/datautils.py
         data = get_wikitext2(
+            raw_dataset=raw_dataset,
+            tokenizer=tokenizer,
+            seqlen=seqlen,
+            nsamples=nsamples,
+            split=split,
+            add_bos_token=(bos_preprocessing == "sequence" and tokenizer.bos_token_id is not None),
+            seed=seed)
+    elif dataset_name == "commonsense_qa":
+        # TODO: Document-level BOS preprocessing is not supported for CommonSenseQA yet
+        if bos_preprocessing == "document":
+            bos_preprocessing = "sequence"
+            warnings.warn(
+                "CommonSenseQA does not support document-level BOS. Default to sequence-level.")
+        data = get_commonsense_qa(
             raw_dataset=raw_dataset,
             tokenizer=tokenizer,
             seqlen=seqlen,
