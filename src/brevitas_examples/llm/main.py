@@ -10,6 +10,7 @@ import sys
 
 import numpy as np
 import torch
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
 
@@ -20,6 +21,7 @@ from brevitas.graph.equalize import apply_rewriters
 from brevitas.graph.equalize import fuse_parametrizations
 from brevitas.graph.equalize import GraphRotationEqualization
 from brevitas.graph.equalize import LayerwiseActivationRotation
+from brevitas.graph.equalize import rotate_permute_mode
 from brevitas.graph.quantize import functional_quantization_mode
 from brevitas.graph.quantize import layerwise_quantize
 from brevitas.graph.utils import get_module
@@ -109,29 +111,58 @@ def fused_rotation_no_fx(model, calibration_loader, args):
 
     for r in rewriters:
         r.apply(model)
+    fx_model = offload_model(fx_model)
 
     # Since we apply the rewriters to a different, non-fx model, we need only to compute them
     # And apply them in a second moment on the non-fx model
     delay_rewriters = True
     return_rewriters = True
 
-    eq = GraphRotationEqualization(
-        orphan_sink=args.rotation_orphan_sink,
-        full_rotation_method=args.rotation_mode,
-        return_rewriters=return_rewriters,
-        sdpa_regions=args.rotation_sdpa_regions,
-        use_parametrized_rotations=args.optimize_rotations,
-        delay_rewriters=delay_rewriters,
-        expansion_step=args.expansion_step,
-        layers_to_expand=layers_to_expand,
-        block_rotation_dim=args.block_rotation_dim,
-        disable_block_rotation_for_fused=args.disable_block_rotation_for_fused)
-    fx_model, rewriters = eq.apply(fx_model)
+    # When both rotation and permutation are enabled, use the unified context manager
+    if args.apply_permute:
+        print("Applying permutations...")
+        with rotate_permute_mode(
+                fx_model,
+                permute_fn=args.permute_fn,
+                orphan_sink=args.rotation_orphan_sink,
+                full_rotation_method=args.rotation_mode,
+                return_rewriters=return_rewriters,
+                sdpa_regions=args.rotation_sdpa_regions,
+                use_parametrized_rotations=args.optimize_rotations,
+                delay_rewriters=delay_rewriters,
+                expansion_step=args.expansion_step,
+                layers_to_expand=layers_to_expand,
+                block_rotation_dim=args.block_rotation_dim,
+                disable_block_rotation_for_fused=args.disable_block_rotation_for_fused) as rpm:
 
-    model = offload_model(model)
-    rewriters = fix_rewriter(rewriters, model, 'weight')
+            # Get fx_model from the context manager
+            fx_model = rpm.model
+            # Run calibration on fx_model to collect activation statistics
+            with torch.no_grad():
+                fx_model(**calibration_loader[0])
+            # Get rewriters from the context manager
+            rewriters = rpm.rewriters
+    else:
+        # Only rotation enabled
+        eq = GraphRotationEqualization(
+            orphan_sink=args.rotation_orphan_sink,
+            full_rotation_method=args.rotation_mode,
+            return_rewriters=return_rewriters,
+            sdpa_regions=args.rotation_sdpa_regions,
+            use_parametrized_rotations=args.optimize_rotations,
+            delay_rewriters=delay_rewriters,
+            expansion_step=args.expansion_step,
+            layers_to_expand=layers_to_expand,
+            block_rotation_dim=args.block_rotation_dim,
+            disable_block_rotation_for_fused=args.disable_block_rotation_for_fused)
+        fx_model, rewriters = eq.apply(fx_model)
 
-    model = apply_rewriters(model, rewriters, delay_rewriters=False)
+    # fused_rotation_no_fx() may be called either if args.rotation == 'fused_no_fx' or args.apply_permute,
+    # so if args.rotation == 'layerwise', we need to skip applying the rewriters here to do it later
+    if args.rotation != 'layerwise':
+        model = offload_model(model)
+        rewriters = fix_rewriter(rewriters, model, 'weight')
+        model = apply_rewriters(model, rewriters, delay_rewriters=False)
 
 
 def set_seed(seed):
@@ -188,7 +219,7 @@ def model_export(model, tokenizer, ref_input, args, config=None):
         root_theta = ds.root_theta.flatten()
 
         # Export is always upcast to float32, and if we don't update the properties, it will fail
-        properties['torch_dtype'] = 'float32'
+        properties['dtype'] = 'float32'
         root_theta = Theta(gguf_mapping(root_theta, config))
         properties = convert_hf_hparams_to_gguf(_get_dataset_props(properties))
         root_theta.rename_tensors_to_paths()
@@ -216,7 +247,7 @@ def quantize_llm(args, extra_args=None):
 
     # Whether to quantize SDPA with FX
 
-    kwargs = {"torch_dtype": args.dtype}
+    kwargs = {"dtype": args.dtype}
     if args.quant_sdpa:
         kwargs["attn_implementation"] = "sdpa"
 
@@ -342,7 +373,15 @@ def quantize_llm(args, extra_args=None):
             disable_block_rotation_for_fused=args.disable_block_rotation_for_fused)
         model = eq.apply(model)
         remove_hooks(model)
-    elif args.rotation == 'layerwise':
+
+    # Permutations are always fused. So, if we are applying them, then we go through
+    # the 'fused_no_fx' path to get the permutation-equivariant regions in the graph.
+    # If args.rotation == 'layerwise', then the rotations will not be applied in
+    # fused_rotation_no_fx(). Rotations will be added in the layerwise block below.
+    if args.rotation == 'fused_no_fx' or args.apply_permute:
+        fused_rotation_no_fx(model, calibration_loader, args)
+
+    if args.rotation == 'layerwise':
         model = offload_model(model)
         eq = LayerwiseActivationRotation(
             layers_to_expand=layers_to_expand,
@@ -350,8 +389,6 @@ def quantize_llm(args, extra_args=None):
             block_rotation_dim=args.block_rotation_dim)
         model = eq.apply(model)
         remove_hooks(model)
-    elif args.rotation == 'fused_no_fx':
-        fused_rotation_no_fx(model, calibration_loader, args)
 
     if args.weight_equalization:
         print("Apply weight equalization...")
@@ -589,12 +626,14 @@ def quantize_llm(args, extra_args=None):
             model = offload_model(model)
 
         if args.load_checkpoint:
+            print(f"Loading checkpoint from {args.checkpoint_name}...")
             remove_hooks(model)
             with load_quant_model_mode(model):
                 model.load_state_dict(torch.load(args.checkpoint_name, map_location='cpu'))
             model = offload_model(model)
+            print("Checkpoint loaded.")
 
-        if args.gptq and not args.load_checkpoint:
+        if args.gptq:
             print("Applying GPTQ...")
             apply_gptq(
                 model,
@@ -608,7 +647,7 @@ def quantize_llm(args, extra_args=None):
                 max_accumulator_tile_size=args.gpxq_max_accumulator_tile_size)
             print("GPTQ applied.")
 
-        if args.gpfq and not args.load_checkpoint:
+        if args.gpfq:
             print("Applying GPFQ...")
             apply_gpfq(
                 model,
@@ -620,7 +659,7 @@ def quantize_llm(args, extra_args=None):
                 max_accumulator_tile_size=args.gpxq_max_accumulator_tile_size)
             print("GPFQ applied.")
 
-        if args.qronos and not args.load_checkpoint:
+        if args.qronos:
             print("Applying Qronos...")
             apply_qronos(
                 model,
