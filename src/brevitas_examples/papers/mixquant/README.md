@@ -1,15 +1,33 @@
 # MixQuant: Pushing the Limits of Block Rotations in Post-Training Quantization
 
-This branch is intended to ease the reproduction of results in our paper.
+This branch is intended to ease the reproduction of the experiments from our paper: "[MixQuant: Pushing the Limits of Block Rotations in Post-Training Quantization](https://arxiv.org/pdf/2601.22347)"
 
-## Requirements
+🚨 This branch is not intended to be maintained, MixQuant support is added to mainline Brevitas here:
+https://github.com/Xilinx/brevitas/pull/1448
+
+## Citation
+
+```
+@article{sanjeet2026mixquant,
+      title={MixQuant: Pushing the Limits of Block Rotations in Post-Training Quantization},
+      author={Sai Sanjeet and Ian Colbert and Pablo Monteagudo-Lago and Giuseppe Franco and Yaman Umuroglu and Nicholas J. Fraser},
+      year={2026},
+      eprint={2601.22347},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2601.22347},
+}
+```
+
+## Requirements for these experiments
+
+See [README](https://github.com/i-colbert/brevitas?tab=readme-ov-file#requirements) for general Brevitas requirements. Below are versions used here.
 
 - python==3.12
 - torch==2.6.0+rocm6.1
 - transformers==4.57.3
 - lighteval==0.13.0
 - fast_hadamard_transform==1.0.4.post1 (custom fork, see below)
-- datasets, optimum, accelerate
 
 ### Installation
 
@@ -65,6 +83,6 @@ The full-precision BF16 model gives a perplexity of 11.8.
 
 ## References
 
-1. Egiazarian, Vage, et al. "Bridging the Gap Between Promise and Performance for Microscaling FP4 Quantization." arXiv preprint arXiv:2509.23202 (2025).
+1. Egiazarian, Vage, et al. "Bridging the Gap Between Promise and Performance for Microscaling FP4 Quantization." arXiv preprint (2025).
 
-2. Shao, Yuantian, et al. "Block rotation is all you need for mxfp4 quantization." arXiv preprint arXiv:2511.04214 (2025).
+2. Shao, Yuantian, et al. "Block Rotation is All You Need for MXFP4 Quantization." arXiv preprint (2025).
