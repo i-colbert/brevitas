@@ -20,7 +20,8 @@ __all__ = [
     'ShiftedUint8WeightPerChannelFloatMSE',
     'ShiftedUint8ActPerTensorFloatHQO',
     'ShiftedUint8WeightPerChannelFloatHQO',
-    'ShiftedUint8WeightPerTensorFloatHQO']
+    'ShiftedUint8WeightPerTensorFloatHQO',
+    'ShiftedUint8WeightPerGroupFloatMSE']
 
 
 class ShiftedUint8ActPerTensorFixedPoint(ShiftedParamFromPercentileUintQuant,
@@ -201,3 +202,9 @@ class ShiftedUint8WeightGroupQuantFloat(ShiftedUint8WeightPerChannelFloat):
     """
     proxy_class = GroupwiseWeightQuantProxyFromInjector
     scaling_per_output_type = ScalingPerOutputType.GROUP
+
+
+class ShiftedUint8WeightPerGroupFloatMSE(ShiftedUint8WeightPerChannelFloatMSE):
+    group_size = 32
+    scaling_per_output_type = ScalingPerOutputType.GROUP
+    proxy_class = GroupwiseWeightQuantProxyFromInjector

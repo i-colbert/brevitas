@@ -36,6 +36,7 @@ from brevitas.proxy.groupwise_int_runtime_quant import GroupwiseActQuantProxyFro
 from brevitas.proxy.runtime_quant import DynamicActQuantProxyFromInjector
 from brevitas.quant.base import HQOWeightZeroPoint
 from brevitas.quant.base import MSESymmetricScale
+from brevitas.quant.base import MSESymmetricScaleSubInjector
 from brevitas.quant.base import PerChannelPoTScaling8bit
 from brevitas.quant.experimental.float import Fp8e4m3ActPerTensorFloat
 from brevitas.quant.experimental.float import Fp8e4m3WeightPerChannelFloat
@@ -45,6 +46,7 @@ from brevitas.quant.experimental.float_quant_ocp import Fp8e4m3OCPWeightPerChann
 from brevitas.quant.scaled_int import Int8ActPerTensorFloat
 from brevitas.quant.scaled_int import Int8WeightPerChannelFloat
 from brevitas.quant.scaled_int import Int8WeightPerChannelFloatHQO
+from brevitas.quant.scaled_int import Int8WeightPerChannelFloatMSE
 from brevitas.quant.scaled_int import Int8WeightPerTensorFloat
 from brevitas.quant.shifted_scaled_int import ShiftedUint8ActPerTensorFloat
 from brevitas.quant.shifted_scaled_int import ShiftedUint8WeightPerChannelFloat
@@ -90,6 +92,16 @@ class IntWeightSymmetricGroupQuant(Int8WeightPerChannelFloat):
     Block / group / vector signed symmetric int weight quantizer with float scales.
     We inherit from a per-channel quantizer to re-use some underlying machinery.
     """
+    proxy_class = GroupwiseWeightQuantProxyFromInjector
+    scaling_per_output_type = ScalingPerOutputType.GROUP
+
+
+class IntWeightSymmetricGroupQuantMSE(Int8WeightPerChannelFloatMSE):
+
+    class _Override(MSESymmetricScaleSubInjector):
+        mse_iters = 40
+
+    mse_scale = _Override
     proxy_class = GroupwiseWeightQuantProxyFromInjector
     scaling_per_output_type = ScalingPerOutputType.GROUP
 
