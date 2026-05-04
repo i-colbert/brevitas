@@ -139,15 +139,22 @@ class CaileySGD(Optimizer):
 
                 param = p.data
                 param_state = self.state[p]
-                # Store a copy of weights in desired dtype if it is different from param dtype
-                if self.dtype is not None and self.dtype != param.dtype:
+                # Shadow dtype buffer is only consumed by the Stiefel branch
+                # (see param.copy_(p_new) below). Skip allocation otherwise.
+                if stiefel and self.dtype is not None and self.dtype != param.dtype:
                     if "weight_buffer" not in param_state:
                         param_state["weight_buffer"] = param.clone().to(self.dtype)
                     param = param_state["weight_buffer"]
 
-                unity = param.view(p.size()[0], -1)
-                unity, _ = unit(unity)
-                if stiefel and unity.size()[0] <= unity.size()[1]:
+                # Split: outer guard avoids the unity computation (and 0-D
+                # p.size()[0] crash) for non-Stiefel params; inner guard takes
+                # the Stiefel branch only when the matrix shape qualifies.
+                if stiefel:
+                    unity = param.view(p.size()[0], -1)
+                    unity, _ = unit(unity)
+                    stiefel = unity.size()[0] <= unity.size()[1]
+
+                if stiefel:
 
                     rand_num = random.randint(1, 101)
                     if rand_num == 1:
@@ -188,11 +195,16 @@ class CaileySGD(Optimizer):
                     dampening = group["dampening"]
                     nesterov = group["nesterov"]
                     d_p = p.grad.data
+                    # Upcast gradient (and thus momentum buffer below) to the
+                    # optimizer dtype so accumulation happens in higher
+                    # precision, mirroring the Stiefel branch above.
+                    if self.dtype is not None:
+                        d_p = d_p.to(self.dtype)
                     #  defined.
                     try:
                         if weight_decay != 0:
                             #  defined.
-                            d_p.add_(weight_decay, p.data)
+                            d_p.add_(weight_decay, p.data.to(d_p.dtype))
                     except:
                         pass
                     if momentum != 0:
@@ -209,6 +221,6 @@ class CaileySGD(Optimizer):
                         else:
                             d_p = buf
 
-                    p.data.add_(-group["lr"], d_p)
+                    p.data.add_(-group["lr"], d_p.to(p.data.dtype))
 
         return loss

@@ -23,8 +23,12 @@ except:
 
 from brevitas.graph.calibrate import quantization_status_manager
 from brevitas.optim.cailey_sgd import CaileySGD
+from brevitas.utils.logging import setup_logger
+from brevitas.utils.parametrization_utils import extract_trainable_quant_params
 from brevitas.utils.parametrization_utils import extract_trainable_rotation_matrices
 from brevitas_examples.common.accelerate_utils.accelerate import remove_hooks
+
+logging = setup_logger(__name__)
 
 
 @dataclass
@@ -41,6 +45,21 @@ class TrainingArguments(transformers.TrainingArguments):
         metadata={
             "help":
                 "Data type for CaileySGD optimizer computations. None means use parameter dtype."})
+
+    ### Quantization parameter optimization args
+    optimize_quant_params: bool = field(
+        default=False,
+        metadata={
+            "help":
+                "Whether to also optimize learnable scale and zero-point "
+                "parameters alongside rotations."})
+    quant_param_learning_rate: float = field(
+        default=1e-4,
+        metadata={
+            "help":
+                "Learning rate for the scale/zero-point parameter group. "
+                "Shared between scales and ZPs. Only used when "
+                "optimize_quant_params=True."})
 
     ### Distillation Loss args
     use_distillation_loss: bool = field(
@@ -169,8 +188,31 @@ def apply_rotation_optimization(
     trainable_rotations = extract_trainable_rotation_matrices(model)
     for rot_mat in trainable_rotations:
         rot_mat.requires_grad = True
+    logging.info(
+        f"Detected {len(trainable_rotations)} trainable rotation matrices "
+        f"(lr={training_args.learning_rate}).")
+    param_groups = [{"params": trainable_rotations, "stiefel": True}]
+
+    if training_args.optimize_quant_params:
+        quant_params = extract_trainable_quant_params(model)
+        assert len(quant_params) > 0, (
+            "optimize_quant_params=True but no learnable scales/zero-points "
+            "were found in the model. Check that the quantization config uses "
+            "ScalingImplType.PARAMETER or PARAMETER_FROM_STATS (and analogous "
+            "learnable zero-point impls) before calling apply_rotation_optimization.")
+        for p in quant_params:
+            p.requires_grad = True
+        n_elem = sum(p.numel() for p in quant_params)
+        logging.info(
+            f"Detected {len(quant_params)} learnable scale/zero-point tensors "
+            f"({n_elem} elements total, lr={training_args.quant_param_learning_rate}).")
+        param_groups.append({
+            "params": quant_params,
+            "stiefel": False,
+            "lr": training_args.quant_param_learning_rate,})
+
     optimizer = CaileySGD(
-        trainable_rotations,
+        param_groups,
         lr=training_args.learning_rate,
         stiefel=True,
         dtype=training_args.optimizer_dtype)

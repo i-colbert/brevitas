@@ -141,3 +141,52 @@ def extract_trainable_rotation_matrices(model: nn.Module) -> List[nn.Parameter]:
                 ids_rot.add(id(module.rot_mat))
                 trainable_rotations.append(module.rot_mat)
     return trainable_rotations
+
+
+def extract_trainable_quant_params(model: nn.Module) -> List[nn.Parameter]:
+    """Collect learnable scale and zero-point parameters from quantized model.
+
+    Walks the module tree looking for the six Brevitas impls that hold a
+    learnable ``.value`` Parameter:
+
+      Scales:
+        - brevitas.core.scaling.standalone.ParameterScaling
+        - brevitas.core.scaling.standalone.ParameterFromStatsFromParameterScaling
+        - brevitas.core.scaling.standalone.ParameterFromRuntimeStatsScaling
+
+      Zero-points:
+        - brevitas.core.zero_point.ParameterZeroPoint
+        - brevitas.core.zero_point.ParameterFromStatsFromParameterZeroPoint
+        - brevitas.core.zero_point.ParameterFromRuntimeZeroPoint
+
+    Dedup is by ``id()`` because Brevitas can share ``tensor_quant`` (and thus
+    its scaling_impl/zero_point_impl) across multiple proxies.
+
+    Returns a single flat list (scales and ZPs together) — caller decides
+    learning rate / param group membership.
+    """
+    from brevitas.core.scaling.standalone import ParameterFromRuntimeStatsScaling
+    from brevitas.core.scaling.standalone import ParameterFromStatsFromParameterScaling
+    from brevitas.core.scaling.standalone import ParameterScaling
+    from brevitas.core.zero_point import ParameterFromRuntimeZeroPoint
+    from brevitas.core.zero_point import ParameterFromStatsFromParameterZeroPoint
+    from brevitas.core.zero_point import ParameterZeroPoint
+
+    learnable_classes = (
+        ParameterScaling,
+        ParameterFromStatsFromParameterScaling,
+        ParameterFromRuntimeStatsScaling,
+        ParameterZeroPoint,
+        ParameterFromStatsFromParameterZeroPoint,
+        ParameterFromRuntimeZeroPoint,
+    )
+
+    seen_ids = set()
+    out: List[nn.Parameter] = []
+    for module in model.modules():
+        if isinstance(module, learnable_classes):
+            value = getattr(module, "value", None)
+            if isinstance(value, nn.Parameter) and id(value) not in seen_ids:
+                seen_ids.add(id(value))
+                out.append(value)
+    return out
