@@ -329,7 +329,7 @@ def quantize_llm(args, extra_args=None):
         # Load the data for rotation optimization
         rot_calibration_dataset = get_dataset_for_model(
             bos_preprocessing=args.bos_preprocessing,
-            dataset_name=args.dataset,
+            dataset_name=args.rot_calibration_dataset or args.dataset,
             tokenizer=tokenizer,
             nsamples=args.nsamples_rot_calibration,
             seqlen=args.seqlen,
@@ -603,6 +603,7 @@ def quantize_llm(args, extra_args=None):
             print("Act calibration applied.")
 
         if args.optimize_rotations:
+            print("Optimizing rotations....")
             if args.load_checkpoint:
                 rot_optimization_args.max_steps = 0
             apply_rotation_optimization(
@@ -617,6 +618,7 @@ def quantize_llm(args, extra_args=None):
             model = offload_model(model)
             # Fuse rotations with weights
             model = fuse_parametrizations(model)
+            print("Rotations optimized.")
 
         if args.svd_quant:
             print("Apply SVDQuant...")

@@ -43,6 +43,12 @@ def create_args_parser() -> ArgumentParser:
         type=int,
         default=800,
         help='Number of calibration data samples for rotation. Default: %(default)d.')
+    parser.add_argument(
+        '--rot-calibration-dataset',
+        type=str,
+        choices=['wikitext2', 'c4', 'pile', 'fineweb'],
+        default=None,
+        help='Dataset to use for rotation calibration. Falls back to --dataset if unset.')
     parser.add_argument('--seqlen', type=int, default=2048, help='Sequence length. Default: 2048.')
     parser.add_argument('--eval', action='store_true', help='Eval model PPL on the chosen Dataset.')
     parser.add_argument(
