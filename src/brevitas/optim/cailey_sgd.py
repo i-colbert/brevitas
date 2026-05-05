@@ -204,7 +204,7 @@ class CaileySGD(Optimizer):
                     try:
                         if weight_decay != 0:
                             #  defined.
-                            d_p.add_(weight_decay, p.data.to(d_p.dtype))
+                            d_p.add_(p.data.to(d_p.dtype), alpha=weight_decay)
                     except:
                         pass
                     if momentum != 0:
@@ -214,13 +214,13 @@ class CaileySGD(Optimizer):
                         else:
                             buf = param_state["momentum_buffer"]
                             #  always defined.
-                            buf.mul_(momentum).add_(1 - dampening, d_p)
+                            buf.mul_(momentum).add_(d_p, alpha=1 - dampening)
                         #  defined.
                         if nesterov:
-                            d_p = d_p.add(momentum, buf)
+                            d_p = d_p.add(buf, alpha=momentum)
                         else:
                             d_p = buf
 
-                    p.data.add_(-group["lr"], d_p.to(p.data.dtype))
+                    p.data.add_(d_p.to(p.data.dtype), alpha=-group["lr"])
 
         return loss
