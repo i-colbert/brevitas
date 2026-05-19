@@ -1,15 +1,14 @@
-# MixQuant: Pushing the Limits of Block Rotations in Post-Training Quantization
+# Pushing the Limits of Block Rotations in Post-Training Quantization
 
-This branch is intended to ease the reproduction of the experiments from our paper: "[MixQuant: Pushing the Limits of Block Rotations in Post-Training Quantization](https://arxiv.org/pdf/2601.22347)"
+This branch is intended to ease the reproduction of the experiments from our paper: "[Pushing the Limits of Block Rotations in Post-Training Quantization](https://arxiv.org/pdf/2601.22347)"
 
-🚨 This branch is not intended to be maintained, MixQuant support is added to mainline Brevitas here:
-https://github.com/Xilinx/brevitas/pull/1448
+🚨 This branch is not intended to be maintained, PeRQ support is added to mainline Brevitas: https://xilinx.github.io/brevitas/dev/papers/perq.html
 
 ## Citation
 
 ```
-@article{sanjeet2026mixquant,
-      title={MixQuant: Pushing the Limits of Block Rotations in Post-Training Quantization},
+@article{sanjeet2026perq,
+      title={Pushing the Limits of Block Rotations in Post-Training Quantization},
       author={Sai Sanjeet and Ian Colbert and Pablo Monteagudo-Lago and Giuseppe Franco and Yaman Umuroglu and Nicholas J. Fraser},
       year={2026},
       eprint={2601.22347},
@@ -56,17 +55,17 @@ The configuration files specify three quantization formats:
 
 We provide configurations for the following pipeline compositions for all three quantization formats:
 
-- **MixQuant\***: `{format}/llama3-mixquant_star-{format}.yml`
-- **MixQuant†**: `{format}/llama3-mixquant_dag-{format}.yml`
+- **PeRQ\***: `{format}/llama3-perq_star-{format}.yml`
+- **PeRQ†**: `{format}/llama3-perq_dag-{format}.yml`
 - **MR-Qronos**: `{format}/llama3-mr-qronos-{format}.yml`
 - **MR-GPTQ** [1]: `{format}/llama3-mr-gptq-{format}.yml`
 - **BRQ-Spin** [2]: `{format}/llama3-brq-spin-{format}.yml`
 
-Please see the MixQuant paper or the corresponding references for details on each composition. Fully online rotation configurations are also available in the `online/` subdirectories.
+Please see the PeRQ paper or the corresponding references for details on each composition. Fully online rotation configurations are also available in the `online/` subdirectories.
 
 All config files specify Llama-3.2-1B-Instruct by default. You can choose a different model using the `--model` flag. For example:
 ```shell
-brevitas_ptq_llm --config=int4/llama3-mixquant_star-int4.yml --model=meta-llama/Llama-3.2-3B-Instruct
+brevitas_ptq_llm --config=int4/llama3-perq_star-int4.yml --model=meta-llama/Llama-3.2-3B-Instruct
 ```
 
 Below, we summarize WikiText2 perplexity when quantizing Llama3.2-1B-Instruct to various formats (lower is better).
@@ -76,8 +75,8 @@ Below, we summarize WikiText2 perplexity when quantizing Llama3.2-1B-Instruct to
 | **MR-GPTQ** [1]   |  2256.0    |  43.2   |  14.2     |
 | **BRQ-Spin** [2]    |   1456.0   |   51.2  |   14.9    |
 | **MR-Qronos**    |   41.8   |   23.9  |  14.0     |
-| **MixQuant\***    |  16.9    |  21.0   |   14.2    |
-| **MixQuant†**    |   **15.9**   |  **18.0**   |  **13.2**     |
+| **PeRQ\***    |  16.9    |  21.0   |   14.2    |
+| **PeRQ†**    |   **15.9**   |  **18.0**   |  **13.2**     |
 
 The full-precision BF16 model gives a perplexity of 11.8.
 
